@@ -203,6 +203,7 @@ final class MenuTests: XCTestCase {
             .header("// output"),
             .output(name: nil, symbol: "speaker.wave.2", checked: true),
             .separator,
+            .look(.needle),
             .feedback,
             .alwaysOn(on: true),
             .openAtLogin(on: true),
@@ -385,5 +386,41 @@ final class OutputTests: XCTestCase {
         XCTAssertEqual(entries[0], .flow(status: "Elgato 4K X → AirPods Pro", on: true, enabled: true))
         XCTAssertTrue(entries.contains(.output(name: nil, symbol: "speaker.wave.2", checked: false)))
         XCTAssertTrue(entries.contains(.output(name: "AirPods Pro", symbol: "headphones", checked: true)))
+    }
+}
+
+final class LookTests: XCTestCase {
+    func testNeedleByDefaultAndRemembered() {
+        let settings = PassSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        XCTAssertEqual(settings.look, .needle)
+        let pass = Passthrough(backend: FakeBackend(), settings: settings)
+        var changes = 0
+        pass.onChange = { changes += 1 }
+        pass.setLook(.tally)
+        XCTAssertEqual(settings.look, .tally)
+        XCTAssertEqual(changes, 1)
+        XCTAssertEqual(menuEntries(for: MenuState(flow: .stopped, inputs: [], selectedID: nil, volumePercent: 80,
+                                                  look: .tally, alwaysOn: true, openAtLogin: true)).filter {
+            if case .look = $0 { return true }; return false
+        }, [.look(.tally)])
+    }
+
+    func testButtonLabels() {
+        XCTAssertEqual(flowButtonLabel(look: .needle, on: false), "start()")
+        XCTAssertEqual(flowButtonLabel(look: .phosphor, on: true), "stop()")
+        XCTAssertEqual(flowButtonLabel(look: .tally, on: false), "take()")
+        XCTAssertEqual(flowButtonLabel(look: .tally, on: true), "cut()")
+    }
+
+    func testClock() {
+        XCTAssertEqual(clockString(0), "00:00:00")
+        XCTAssertEqual(clockString(764), "00:12:44")
+        XCTAssertEqual(clockString(3 * 3600 + 5), "03:00:05")
+    }
+
+    func testDecibelScaleMatchesTheVolumeCurve() {
+        XCTAssertEqual(volumePercent(forDecibels: 0), 100, accuracy: 0.001)
+        XCTAssertEqual(volumePercent(forDecibels: -6), 79.4, accuracy: 0.1)
+        XCTAssertEqual(Double(amplitude(percent: Int(volumePercent(forDecibels: -12).rounded()))), 0.25, accuracy: 0.01)
     }
 }

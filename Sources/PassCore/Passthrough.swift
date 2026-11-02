@@ -65,6 +65,12 @@ public final class Passthrough {
     /// At launch: starts the sound when always on is set.
     public func launch() { if settings.alwaysOn { attempt() } }
 
+    public var look: Look { settings.look }
+    public func setLook(_ look: Look) {
+        settings.look = look
+        onChange?()
+    }
+
     public var alwaysOn: Bool { settings.alwaysOn }
     public func setAlwaysOn(_ on: Bool) {
         settings.alwaysOn = on

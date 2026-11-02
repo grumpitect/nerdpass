@@ -175,6 +175,9 @@ final class AppModel: ObservableObject {
     @Published var volumePercent: Int
     @Published var isFlowing = false
     @Published var isWaiting = false
+    @Published var look: Look = .needle
+    /// When the sound started flowing (Tally's on-air clock).
+    var flowStartedAt: Date?
     var onQuit: (() -> Void)?
     /// Closes the menu panel (used after opening a link).
     var closePanel: (() -> Void)?
@@ -204,11 +207,13 @@ final class AppModel: ObservableObject {
 
     func refresh() {
         volumePercent = pass.volumePercent
+        look = pass.look
         if case .flowing = pass.state { isFlowing = true } else { isFlowing = false }
+        if isFlowing, flowStartedAt == nil { flowStartedAt = Date() } else if !isFlowing { flowStartedAt = nil }
         if case .waiting = pass.state { isWaiting = true } else { isWaiting = false }
         entries = menuEntries(for: MenuState(
             flow: pass.state, inputs: pass.inputs, selectedID: pass.selected?.id,
-            outputs: pass.outputs, selectedOutputID: pass.selectedOutput?.id, volumePercent: volumePercent,
+            outputs: pass.outputs, selectedOutputID: pass.selectedOutput?.id, volumePercent: volumePercent, look: look,
             alwaysOn: pass.alwaysOn, openAtLogin: SMAppService.mainApp.status == .enabled, accessDenied: accessDenied))
         onRefresh?()
     }
@@ -237,6 +242,7 @@ final class AppModel: ObservableObject {
     }
     func launch() { if pass.alwaysOn { withAccess { [weak self] in self?.pass.launch() } } }
     func toggleAlwaysOn() { pass.setAlwaysOn(!pass.alwaysOn) }
+    func setLook(_ look: Look) { pass.setLook(look) }
 
     /// Open at login is on by default: Nerdpass turns it on once, at its first launch, so turning it off sticks.
     func defaultLoginOnce() {
@@ -275,41 +281,98 @@ final class AppModel: ObservableObject {
     }
 }
 
-// MARK: - Needle panel
+// MARK: - Looks
 
-/// Nerdpass's look: a backlit analog VU meter on a walnut hi-fi faceplate.
-enum Theme {
-    static let bg = Color(red: 0.086, green: 0.071, blue: 0.047)         // #16120C walnut
-    static let surface = Color(red: 0.133, green: 0.106, blue: 0.071)    // #221B12
-    static let text = Color(red: 0.957, green: 0.914, blue: 0.831)       // #F4E9D4 cream
-    static let dim = Color(red: 0.627, green: 0.557, blue: 0.439)        // #A08E70
-    static let orange = Color(red: 1.000, green: 0.624, blue: 0.110)     // #FF9F1C meter backlight
-    static let red = Color(red: 0.910, green: 0.271, blue: 0.173)        // #E8452C needle red
-    static let blue = Color(red: 0.424, green: 0.706, blue: 1.000)       // #6CB4FF pilot blue, waiting
-    static let bezel = Color(red: 0.227, green: 0.180, blue: 0.118)      // #3A2E1E
-    static let line = Color(red: 0.180, green: 0.141, blue: 0.094)       // #2E2418
-    static let unlit = Color(red: 0.165, green: 0.125, blue: 0.086)      // #2A2016 meter face with the lamp off
-    static let ink = Color(red: 0.102, green: 0.071, blue: 0.031)        // #1A1208 needle and printing on the face
-    static let font = Font.system(size: 13, design: .monospaced)
-    static let scaleFont = Font.custom("Futura-CondensedMedium", size: 9)
-    static let orangeNS = NSColor(red: 1.000, green: 0.624, blue: 0.110, alpha: 1)
-    static let redNS = NSColor(red: 0.910, green: 0.271, blue: 0.173, alpha: 1)
-    static let blueNS = NSColor(red: 0.424, green: 0.706, blue: 1.000, alpha: 1)
-    static let creamNS = NSColor(red: 0.957, green: 0.914, blue: 0.831, alpha: 1)
-    static let darkInkNS = NSColor(red: 0.227, green: 0.165, blue: 0.071, alpha: 1)
+extension Color {
+    init(hex: UInt32, alpha: Double = 1) {
+        self.init(.sRGB, red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255,
+                  blue: Double(hex & 0xFF) / 255, opacity: alpha)
+    }
 }
 
-/// A row that warms up on hover, like a lit button on a faceplate.
+extension NSColor {
+    convenience init(hex: UInt32) {
+        self.init(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255,
+                  blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+    }
+}
+
+/// One look's colors and shapes. Needle: walnut and a backlit orange meter. Phosphor: green trace on a dark CRT.
+/// Tally: warm graphite with an on-air red, a ready green and a standby amber.
+struct Palette {
+    let look: Look
+    let bg: Color, surface: Color, text: Color, dim: Color
+    /// The main color (backlight orange, phosphor green, on-air red) and the second one (needle red, trace-head lime,
+    /// ready green).
+    let accent: Color, accent2: Color
+    let waiting: Color
+    let bezel: Color, line: Color
+    let title: Color
+    /// The name of a chosen input or output.
+    let checkedText: Color
+    let hover: Color
+    let radius: CGFloat
+    let accentNS: NSColor, accent2NS: NSColor, waitingNS: NSColor
+    /// Menu bar ink that isn't tinted by macOS, on a dark and a light menu bar.
+    let inkDarkBarNS: NSColor, inkLightBarNS: NSColor
+    let font = Font.system(size: 13, design: .monospaced)
+
+    static let needle = Palette(
+        look: .needle, bg: Color(hex: 0x16120C), surface: Color(hex: 0x221B12), text: Color(hex: 0xF4E9D4),
+        dim: Color(hex: 0xA08E70), accent: Color(hex: 0xFF9F1C), accent2: Color(hex: 0xE8452C), waiting: Color(hex: 0x6CB4FF),
+        bezel: Color(hex: 0x3A2E1E), line: Color(hex: 0x2E2418), title: Color(hex: 0xFF9F1C), checkedText: Color(hex: 0xFF9F1C),
+        hover: Color(hex: 0xFF9F1C, alpha: 0.10), radius: 14,
+        accentNS: NSColor(hex: 0xFF9F1C), accent2NS: NSColor(hex: 0xE8452C), waitingNS: NSColor(hex: 0x6CB4FF),
+        inkDarkBarNS: NSColor(hex: 0xF4E9D4), inkLightBarNS: NSColor(hex: 0x3A2A12))
+    static let phosphor = Palette(
+        look: .phosphor, bg: Color(hex: 0x07110C), surface: Color(hex: 0x0E1D15), text: Color(hex: 0xD8F5E3),
+        dim: Color(hex: 0x6E9A80), accent: Color(hex: 0x3DFF8A), accent2: Color(hex: 0xB6FF5C), waiting: Color(hex: 0xFFB547),
+        bezel: Color(hex: 0x1F4A31), line: Color(hex: 0x3DFF8A, alpha: 0.25), title: Color(hex: 0x3DFF8A),
+        checkedText: Color(hex: 0x3DFF8A), hover: Color(hex: 0x3DFF8A, alpha: 0.08), radius: 7,
+        accentNS: NSColor(hex: 0x3DFF8A), accent2NS: NSColor(hex: 0xB6FF5C), waitingNS: NSColor(hex: 0xFFB547),
+        inkDarkBarNS: NSColor(hex: 0x3DFF8A), inkLightBarNS: NSColor(hex: 0x11A852))
+    static let tally = Palette(
+        look: .tally, bg: Color(hex: 0x141113), surface: Color(hex: 0x1F1A1C), text: Color(hex: 0xF2ECE4),
+        dim: Color(hex: 0x9A8F88), accent: Color(hex: 0xFF4A3D), accent2: Color(hex: 0x3DDC84), waiting: Color(hex: 0xFFB020),
+        bezel: Color(hex: 0x2E282A), line: Color(hex: 0x2A2426), title: Color(hex: 0xF2ECE4), checkedText: Color(hex: 0xF2ECE4),
+        hover: Color(hex: 0xF2ECE4, alpha: 0.06), radius: 10,
+        accentNS: NSColor(hex: 0xFF4A3D), accent2NS: NSColor(hex: 0x3DDC84), waitingNS: NSColor(hex: 0xFFB020),
+        inkDarkBarNS: NSColor(hex: 0xF2ECE4), inkLightBarNS: NSColor(hex: 0x1B1B1D))
+
+    static func of(_ look: Look) -> Palette {
+        switch look {
+        case .needle: return .needle
+        case .phosphor: return .phosphor
+        case .tally: return .tally
+        }
+    }
+}
+
+private struct PaletteKey: EnvironmentKey { static let defaultValue = Palette.needle }
+extension EnvironmentValues {
+    var palette: Palette {
+        get { self[PaletteKey.self] }
+        set { self[PaletteKey.self] = newValue }
+    }
+}
+
+// MARK: - Shared panel pieces
+
+/// A row that lights up on hover (Phosphor also draws a bar at its left edge, like a scope's cursor).
 struct RowButton<Label: View>: View {
     let action: () -> Void
     @ViewBuilder let label: () -> Label
     @State private var hover = false
+    @Environment(\.palette) private var p
     var body: some View {
         Button(action: action) {
             label()
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 5).fill(hover ? Theme.orange.opacity(0.10) : .clear))
+                .background(RoundedRectangle(cornerRadius: 5).fill(hover ? p.hover : .clear))
+                .overlay(alignment: .leading) {
+                    if hover && p.look == .phosphor { Rectangle().fill(p.accent).frame(width: 2).padding(.vertical, 2) }
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -318,272 +381,111 @@ struct RowButton<Label: View>: View {
     }
 }
 
-/// Moves the label down a point while pressed, like a rocker switch.
+/// Moves the label down a point while pressed, like a switch.
 struct PressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.offset(y: configuration.isPressed ? 1 : 0)
     }
 }
 
-/// The start/stop rocker: a pilot light, the label, an orange outline that fills on hover.
-struct RockerButton: View {
+/// The start/stop button, drawn per look: Needle's rocker with a pilot light, Phosphor's outlined key with a
+/// glowing underline while on, Tally's green take() and solid red cut().
+struct FlowButton: View {
     let on: Bool
     let enabled: Bool
     let action: () -> Void
     @State private var hover = false
+    @Environment(\.palette) private var p
+
     var body: some View {
-        Button(action: action) {
+        Button(action: action) { label.contentShape(Rectangle()) }
+            .buttonStyle(PressStyle())
+            .focusable(false)
+            .disabled(!enabled)
+            .help(on ? "Stop the sound" : "Play the capture card's sound through this Mac")
+            .onHover { hover = $0 }
+    }
+
+    private var title: String { flowButtonLabel(look: p.look, on: on) }
+
+    @ViewBuilder private var label: some View {
+        switch p.look {
+        case .needle:
             HStack(spacing: 8) {
-                Circle().fill(on ? Theme.orange : Theme.bezel).frame(width: 6, height: 6)
-                    .shadow(color: on ? Theme.orange : .clear, radius: 3)
-                Text(on ? "stop()" : "start()").bold()
+                Circle().fill(on ? p.accent : p.bezel).frame(width: 6, height: 6).shadow(color: on ? p.accent : .clear, radius: 3)
+                Text(title).bold()
             }
             .frame(width: 130, height: 30)
-            .foregroundColor(enabled ? (hover ? Theme.bg : Theme.text) : Theme.dim.opacity(0.6))
-            .background(RoundedRectangle(cornerRadius: 8).fill(hover && enabled ? Theme.orange : Theme.surface))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(enabled ? Theme.orange : Theme.bezel))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressStyle())
-        .focusable(false)
-        .disabled(!enabled)
-        .help(on ? "Stop the sound" : "Play the capture card's sound through this Mac")
-        .onHover { hover = $0 }
-    }
-}
-
-/// The signal path: [card] ~~~▶ [speakers].
-struct SignalChain: View {
-    @ObservedObject var model: AppModel
-    var body: some View {
-        let flowing = model.isFlowing, waiting = model.isWaiting
-        let ends = flowing ? Theme.text : Theme.dim
-        HStack(spacing: 6) {
-            Text("[\((model.pass.selectedName ?? "capture card").lowercased())]").foregroundColor(ends)
-                .lineLimit(1).truncationMode(.middle)
-            Cable(model: model, flowing: flowing, waiting: waiting).frame(width: 50, height: 18)
-            Text("▶").foregroundColor(flowing ? Theme.orange : (waiting ? Theme.blue : Theme.dim))
-            Text("[\((model.pass.selectedOutput?.name ?? "speakers").lowercased())]").foregroundColor(ends)
-                .lineLimit(1).truncationMode(.middle)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
-/// The cable from the card to the speakers. While sound flows it carries a waveform that travels toward the
-/// speakers and grows with the sound level (from the meter's needle, so it moves with the same smooth timing);
-/// it is dashed blue while Nerdpass waits for the card, and unplugged (a gap in the middle) when stopped.
-struct Cable: View {
-    let model: AppModel
-    let flowing: Bool
-    let waiting: Bool
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !flowing)) { context in
-            Canvas { ctx, size in
-                let y = size.height / 2
-                func line(_ from: CGFloat, _ to: CGFloat, _ color: Color, dash: [CGFloat] = []) {
-                    var p = Path(); p.move(to: CGPoint(x: from, y: y)); p.addLine(to: CGPoint(x: to, y: y))
-                    ctx.stroke(p, with: .color(color), style: StrokeStyle(lineWidth: 1.5, dash: dash))
-                }
-                if flowing {
-                    let t = context.date.timeIntervalSinceReferenceDate
-                    let level = min(1, max(0, model.meter.needle.position))
-                    let amp = 1.2 + level * (y - 2)
-                    var wave = Path()
-                    for i in 0...Int(size.width) {
-                        let x = CGFloat(i), u = Double(x / size.width)
-                        // Pinned to the cable at both ends; two partials so it looks like sound, not a test tone.
-                        let envelope = pow(sin(Double.pi * u), 0.8)
-                        let s = 0.7 * sin(2 * Double.pi * (u * 3 - t * 1.6)) + 0.3 * sin(2 * Double.pi * (u * 7 - t * 2.9))
-                        let point = CGPoint(x: x, y: y - CGFloat(envelope * s) * amp)
-                        if i == 0 { wave.move(to: point) } else { wave.addLine(to: point) }
+            .foregroundColor(enabled ? (hover ? p.bg : p.text) : p.dim.opacity(0.6))
+            .background(RoundedRectangle(cornerRadius: 8).fill(hover && enabled ? p.accent : p.surface))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(enabled ? p.accent : p.bezel))
+        case .phosphor:
+            HStack(spacing: 8) {
+                Image(systemName: on ? "stop.fill" : "play.fill").font(.system(size: 11, weight: .bold))
+                Text(title).bold()
+                    .overlay(alignment: .bottom) {
+                        if on && !hover {
+                            Rectangle().fill(p.accent).frame(height: 2).offset(y: 4).shadow(color: p.accent, radius: 3)
+                        }
                     }
-                    ctx.drawLayer { l in
-                        l.addFilter(.blur(radius: 2))
-                        l.stroke(wave, with: .color(Theme.orange.opacity(0.7)), lineWidth: 2.5)
-                    }
-                    ctx.stroke(wave, with: .color(Theme.orange), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                } else if waiting {
-                    line(0, size.width, Theme.blue, dash: [4, 3])
-                } else {
-                    line(0, size.width * 0.38, Theme.dim)
-                    line(size.width * 0.62, size.width, Theme.dim)
-                }
             }
+            .frame(width: 130, height: 30)
+            .foregroundColor(enabled ? (hover ? p.bg : p.accent) : p.dim.opacity(0.6))
+            .background(RoundedRectangle(cornerRadius: 4).fill(hover && enabled ? p.accent : .clear))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(enabled ? p.accent : p.bezel))
+        case .tally:
+            let fill: Color = on ? (hover ? Color(hex: 0xD92C22) : p.accent) : (hover && enabled ? p.accent2 : .clear)
+            Text(title).bold()
+                .frame(width: 150, height: 32)
+                .foregroundColor(!enabled ? p.dim.opacity(0.6) : (on ? Color(hex: 0xFFF3E6) : (hover ? p.bg : p.accent2)))
+                .background(RoundedRectangle(cornerRadius: 6).fill(fill))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(!enabled ? p.bezel : (on ? p.accent : p.accent2)))
         }
     }
 }
 
-/// A separator: a thin line between two screw heads.
-struct Faceplate: View {
+/// A separator: Needle's line between two screw heads, Phosphor's dotted graticule line with a center tick,
+/// Tally's plain hairline.
+struct Separator: View {
+    @Environment(\.palette) private var p
     var body: some View {
         Canvas { ctx, size in
             let y = size.height / 2
-            var p = Path(); p.move(to: CGPoint(x: 7, y: y)); p.addLine(to: CGPoint(x: size.width - 7, y: y))
-            ctx.stroke(p, with: .color(Theme.line), lineWidth: 1)
-            for x in [CGFloat(2), size.width - 2] {
-                ctx.fill(Path(ellipseIn: CGRect(x: x - 2, y: y - 2, width: 4, height: 4)), with: .color(Theme.bezel))
+            switch p.look {
+            case .needle:
+                var l = Path(); l.move(to: CGPoint(x: 7, y: y)); l.addLine(to: CGPoint(x: size.width - 7, y: y))
+                ctx.stroke(l, with: .color(p.line), lineWidth: 1)
+                for x in [CGFloat(2), size.width - 2] {
+                    ctx.fill(Path(ellipseIn: CGRect(x: x - 2, y: y - 2, width: 4, height: 4)), with: .color(p.bezel))
+                }
+            case .phosphor:
+                var x: CGFloat = 1
+                while x < size.width { ctx.fill(Path(ellipseIn: CGRect(x: x - 0.6, y: y - 0.6, width: 1.2, height: 1.2)), with: .color(p.line)); x += 6 }
+                ctx.fill(Path(CGRect(x: size.width / 2 - 0.5, y: y - 2.5, width: 1, height: 5)), with: .color(p.accent.opacity(0.6)))
+            case .tally:
+                ctx.fill(Path(CGRect(x: 0, y: y - 0.5, width: size.width, height: 1)), with: .color(p.line))
             }
         }
         .frame(height: 5).padding(.vertical, 4)
     }
 }
 
-struct NerdView: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                HoverLink(text: "nerdpass", color: Theme.orange, bold: true, url: projectURL, open: { model.open($0) })
-                Spacer()
-                Text("v" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"))
-                    .foregroundColor(Theme.dim)
-                    .help("build " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"))
-            }
-            ForEach(Array(model.entries.enumerated()), id: \.offset) { _, entry in row(entry) }
-        }
-        .font(Theme.font)
-        .foregroundColor(Theme.text)
-        .padding(12)
-        .frame(width: 330)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Theme.bg))
-        .overlay(RoundedRectangle(cornerRadius: 12.5).strokeBorder(Theme.text.opacity(0.06), lineWidth: 1).padding(1.5))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.bezel, lineWidth: 1.5))
-        .shadow(color: .black.opacity(0.35), radius: 10, y: 5)
-        .padding(EdgeInsets(top: 4, leading: 12, bottom: 18, trailing: 12))     // room for the shadow
-    }
-
-    private var statusColor: Color {
-        switch model.pass.state {
-        case .waiting: return Theme.blue
-        case .failed: return Theme.red
-        default: return Theme.dim
-        }
-    }
-
-    @ViewBuilder private func row(_ entry: MenuEntry) -> some View {
-        switch entry {
-        case let .flow(status, on, enabled):
-            VStack(alignment: .center, spacing: 6) {
-                SignalChain(model: model)
-                if !model.isFlowing {
-                    Text(status).foregroundColor(statusColor).lineLimit(1).truncationMode(.middle)
-                }
-                RockerButton(on: on, enabled: enabled) { model.toggle() }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
-        case .volume:
-            HStack(spacing: 6) {
-                Text("vol").foregroundColor(Theme.dim)
-                VolumeScale(percent: model.volumePercent) { model.setVolume($0) }
-                Text("\(model.volumePercent)%").foregroundColor(Theme.text).monospacedDigit()
-                    .frame(width: 38, alignment: .trailing)
-            }.padding(.vertical, 2)
-        case .separator:
-            Faceplate()
-        case let .header(text):
-            Text(text).foregroundColor(Theme.dim).padding(.horizontal, 8).padding(.top, 2)
-        case let .output(name, symbol, checked):
-            RowButton(action: { model.selectOutput(name) }) {
-                HStack(spacing: 8) {
-                    Text(checked ? ">" : " ").foregroundColor(Theme.orange).bold()
-                    Image(systemName: symbol).frame(width: 16).foregroundColor(checked ? Theme.orange : Theme.dim)
-                    Text(name ?? "system_default").foregroundColor(checked ? Theme.orange : Theme.text)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                }
-            }
-            .help(name == nil ? "Play to the Mac's current output (follows Sound settings)" : "Play to \(name!)")
-        case .noInputs:
-            Text("// no audio inputs: plug in your capture card").foregroundColor(Theme.dim).lineLimit(1)
-        case .permission:
-            RowButton(action: { model.openPrivacySettings() }) {
-                HStack(spacing: 8) {
-                    Text(" ")
-                    Image(systemName: "exclamationmark.triangle.fill").frame(width: 16).foregroundColor(Theme.red)
-                    Text("allow_audio_input…").foregroundColor(Theme.red)
-                    Spacer()
-                    Text("settings ↗").foregroundColor(Theme.dim)
-                }
-            }
-            .help("Turn on Nerdpass in System Settings > Privacy & Security > Microphone (capture cards count as one)")
-        case let .input(name, symbol, checked):
-            RowButton(action: { model.select(name) }) {
-                HStack(spacing: 8) {
-                    Text(checked ? ">" : " ").foregroundColor(Theme.orange).bold()
-                    Image(systemName: symbol).frame(width: 16).foregroundColor(checked ? Theme.orange : Theme.dim)
-                    Text(name).foregroundColor(checked ? Theme.orange : Theme.text).lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                }
-            }
-        case .feedback:
-            RowButton(action: { model.openFeedback() }) {
-                HStack(spacing: 8) {
-                    Text(" ").bold()
-                    Image(systemName: "bubble.left.and.text.bubble.right").frame(width: 16).foregroundColor(Theme.dim)
-                    Text("feedback")
-                    Spacer()
-                    Text("github ↗").foregroundColor(Theme.dim)
-                }
-            }
-        case let .alwaysOn(on):
-            toggleRow("always_on", symbol: "infinity", on: on, action: model.toggleAlwaysOn)
-                .help("Start the sound every time Nerdpass opens (with open_at_login: whenever you log in)")
-        case let .openAtLogin(on):
-            toggleRow("open_at_login", symbol: "laptopcomputer", on: on, action: model.toggleLogin)
-        case .exit:
-            RowButton(action: { model.onQuit?() }) {
-                HStack(spacing: 8) {
-                    Text(" ").bold()
-                    Image(systemName: "power").frame(width: 16).foregroundColor(Theme.dim)
-                    Text("exit()")
-                    Spacer()
-                    Text("⌘Q").foregroundColor(Theme.dim)
-                }
-            }
-        }
-    }
-
-    private func toggleRow(_ label: String, symbol: String, on: Bool, action: @escaping () -> Void) -> some View {
-        RowButton(action: action) {
-            HStack(spacing: 8) {
-                Text(on ? ">" : " ").foregroundColor(Theme.orange).bold()
-                Image(systemName: symbol).frame(width: 16).foregroundColor(on ? Theme.orange : Theme.dim)
-                Text(label).foregroundColor(on ? Theme.text : Theme.dim)
-                Spacer()
-            }
-        }
-    }
-}
-
-/// The volume is a straight meter scale: a cream line up to the setting, a red pointer to drag, and a red tint over
-/// the last tenth. Click or drag anywhere on it.
+/// The volume control, drawn per look; click or drag anywhere on it.
+/// Needle: a meter scale with a red pointer. Phosphor: a scope axis with a glowing set line and a lime cursor.
+/// Tally: a broadcast fader labelled in dB.
 struct VolumeScale: View {
     let percent: Int
     let onChange: (Int) -> Void
     @State private var hover = false
+    @Environment(\.palette) private var p
 
     var body: some View {
         GeometryReader { geo in
             Canvas { ctx, size in
-                let w = size.width, v = CGFloat(percent) / 100, y: CGFloat = 9
-                var base = Path(); base.move(to: CGPoint(x: 0, y: y)); base.addLine(to: CGPoint(x: w, y: y))
-                ctx.stroke(base, with: .color(hover ? Theme.dim : Theme.bezel), lineWidth: 1)
-                ctx.fill(Path(CGRect(x: w * 0.9, y: y - 1.5, width: w * 0.1, height: 3)), with: .color(Theme.red.opacity(0.35)))
-                if v > 0 {
-                    var set = Path(); set.move(to: CGPoint(x: 1.5, y: y)); set.addLine(to: CGPoint(x: max(1.5, v * w - 3), y: y))
-                    ctx.stroke(set, with: .color(Theme.text), style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                }
-                let px = min(w - 4, max(4, v * w))
-                var pointer = Path()
-                pointer.move(to: CGPoint(x: px, y: y - 2)); pointer.addLine(to: CGPoint(x: px - 4, y: 0))
-                pointer.addLine(to: CGPoint(x: px + 4, y: 0)); pointer.closeSubpath()
-                ctx.fill(pointer, with: .color(Theme.red))
-                for n in [0, 25, 50, 75, 100] {
-                    let x = min(w - 7, max(5, CGFloat(n) / 100 * w))
-                    ctx.draw(Text("\(n)").font(Theme.scaleFont).foregroundColor(Theme.dim), at: CGPoint(x: x, y: y + 10))
+                switch p.look {
+                case .needle: drawNeedle(ctx, size)
+                case .phosphor: drawPhosphor(ctx, size)
+                case .tally: drawTally(ctx, size)
                 }
             }
             .contentShape(Rectangle())
@@ -596,6 +498,65 @@ struct VolumeScale: View {
         .frame(height: 24)
         .onHover { hover = $0 }
         .help("Click or drag to set the volume")
+    }
+
+    private var v: CGFloat { CGFloat(percent) / 100 }
+
+    private func hline(_ ctx: GraphicsContext, _ from: CGFloat, _ to: CGFloat, _ y: CGFloat, _ color: Color, _ width: CGFloat,
+                       cap: CGLineCap = .butt) {
+        var l = Path(); l.move(to: CGPoint(x: from, y: y)); l.addLine(to: CGPoint(x: to, y: y))
+        ctx.stroke(l, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: cap))
+    }
+
+    private func drawNeedle(_ ctx: GraphicsContext, _ size: CGSize) {
+        let w = size.width, y: CGFloat = 9
+        hline(ctx, 0, w, y, hover ? p.dim : p.bezel, 1)
+        ctx.fill(Path(CGRect(x: w * 0.9, y: y - 1.5, width: w * 0.1, height: 3)), with: .color(p.accent2.opacity(0.35)))
+        if v > 0 { hline(ctx, 1.5, max(1.5, v * w - 3), y, p.text, 3, cap: .round) }
+        let px = min(w - 4, max(4, v * w))
+        var pointer = Path()
+        pointer.move(to: CGPoint(x: px, y: y - 2)); pointer.addLine(to: CGPoint(x: px - 4, y: 0)); pointer.addLine(to: CGPoint(x: px + 4, y: 0))
+        pointer.closeSubpath()
+        ctx.fill(pointer, with: .color(p.accent2))
+        for n in [0, 25, 50, 75, 100] {
+            let x = min(w - 7, max(5, CGFloat(n) / 100 * w))
+            ctx.draw(Text("\(n)").font(.custom("Futura-CondensedMedium", size: 9)).foregroundColor(p.dim), at: CGPoint(x: x, y: y + 10))
+        }
+    }
+
+    private func drawPhosphor(_ ctx: GraphicsContext, _ size: CGSize) {
+        let w = size.width, y: CGFloat = 14
+        hline(ctx, 0, w, y + 0.5, p.dim.opacity(hover ? 1 : 0.6), 1)
+        for i in 0...10 {
+            let x = (CGFloat(i) / 10 * (w - 1)).rounded() + 0.5, tall = i % 5 == 0
+            var t = Path(); t.move(to: CGPoint(x: x, y: y + 0.5)); t.addLine(to: CGPoint(x: x, y: y + (tall ? 6 : 3.5)))
+            ctx.stroke(t, with: .color(p.dim.opacity(hover ? 1 : 0.6)), lineWidth: 1)
+        }
+        if v > 0 {
+            ctx.drawLayer { l in
+                l.addFilter(.blur(radius: 2.5))
+                var s = Path(); s.move(to: CGPoint(x: 0, y: y)); s.addLine(to: CGPoint(x: v * w, y: y))
+                l.stroke(s, with: .color(p.accent), lineWidth: 3)
+            }
+            hline(ctx, 0, v * w, y, p.accent, 2)
+        }
+        let cx = min(w - 1, max(0.5, v * w))
+        ctx.fill(Path(CGRect(x: cx - 0.6, y: y - 10, width: 1.2, height: 12)), with: .color(p.accent2))
+        ctx.draw(Text("▾").font(.system(size: 8)).foregroundColor(p.accent2), at: CGPoint(x: min(w - 4, max(4, cx)), y: 2))
+    }
+
+    private func drawTally(_ ctx: GraphicsContext, _ size: CGSize) {
+        let w = size.width, y: CGFloat = 8
+        ctx.fill(Path(roundedRect: CGRect(x: 0, y: y - 2, width: w, height: 4), cornerRadius: 2), with: .color(p.line))
+        for (from, to, color) in [(0.0, 0.8, p.text), (0.8, 0.95, p.waiting), (0.95, 1.0, p.accent)] where Double(v) > from {
+            ctx.fill(Path(CGRect(x: from * w, y: y - 2, width: (min(Double(v), to) - from) * w, height: 4)), with: .color(color))
+        }
+        ctx.fill(Path(CGRect(x: min(w - 2, max(0, v * w - 1)), y: y - 6, width: 2, height: 12)), with: .color(p.text))
+        // Labelled in dB on the same cubic curve the volume uses (100% is 0 dB).
+        for (label, db) in [("-∞", -200.0), ("-24", -24), ("-12", -12), ("-6", -6), ("0", 0)] {
+            let x = min(w - 6, max(6, CGFloat(volumePercent(forDecibels: db)) / 100 * w))
+            ctx.draw(Text(label).font(.system(size: 8, design: .monospaced)).foregroundColor(p.dim), at: CGPoint(x: x, y: y + 12))
+        }
     }
 }
 
@@ -621,47 +582,502 @@ struct HoverLink: View {
     }
 }
 
-/// The menu bar icon: a tiny VU meter in a rounded ring. Stopped, it is a template image (macOS tints it) with the
-/// needle at rest. While sound flows the ring glows orange and the needle follows the sound; while Nerdpass waits
-/// for the card the ring is blue and the needle sweeps slowly, like a meter self-test.
+/// The look picker: the three names, the chosen one lit.
+struct LookPicker: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.palette) private var p
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(" ").bold()
+            Image(systemName: "paintpalette").frame(width: 16).foregroundColor(p.dim)
+            Text("look")
+            Spacer()
+            ForEach(Look.allCases, id: \.self) { look in
+                LookChoice(name: look.rawValue, chosen: look == model.look) { model.setLook(look) }
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 3)
+    }
+}
+
+struct LookChoice: View {
+    let name: String
+    let chosen: Bool
+    let action: () -> Void
+    @State private var hover = false
+    @Environment(\.palette) private var p
+    var body: some View {
+        Button(action: action) {
+            Text(name).foregroundColor(chosen ? p.accent : (hover ? p.text : p.dim)).bold(chosen).underline(hover && !chosen)
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .onHover { hover = $0 }
+        .help("Switch to the \(name) look")
+    }
+}
+
+// MARK: - Needle
+
+/// The signal path: [card] ~~~▶ [speakers].
+struct SignalChain: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.palette) private var p
+    var body: some View {
+        let flowing = model.isFlowing, waiting = model.isWaiting
+        let ends = flowing ? p.text : p.dim
+        HStack(spacing: 6) {
+            Text("[\((model.pass.selectedName ?? "capture card").lowercased())]").foregroundColor(ends)
+                .lineLimit(1).truncationMode(.middle)
+            Cable(model: model, flowing: flowing, waiting: waiting).frame(width: 50, height: 18)
+            Text("▶").foregroundColor(flowing ? p.accent : (waiting ? p.waiting : p.dim))
+            Text("[\((model.pass.selectedOutput?.name ?? "speakers").lowercased())]").foregroundColor(ends)
+                .lineLimit(1).truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// The cable from the card to the speakers. While sound flows it carries a waveform that travels toward the
+/// speakers and grows with the sound level (from the meter's needle, so it moves with the same smooth timing);
+/// it is dashed while Nerdpass waits for the card, and unplugged (a gap in the middle) when stopped.
+struct Cable: View {
+    let model: AppModel
+    let flowing: Bool
+    let waiting: Bool
+    @Environment(\.palette) private var p
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !flowing)) { context in
+            Canvas { ctx, size in
+                let y = size.height / 2
+                func line(_ from: CGFloat, _ to: CGFloat, _ color: Color, dash: [CGFloat] = []) {
+                    var l = Path(); l.move(to: CGPoint(x: from, y: y)); l.addLine(to: CGPoint(x: to, y: y))
+                    ctx.stroke(l, with: .color(color), style: StrokeStyle(lineWidth: 1.5, dash: dash))
+                }
+                if flowing {
+                    let wave = travellingWave(width: size.width, mid: y, level: model.meter.needle.position,
+                                              time: context.date.timeIntervalSinceReferenceDate)
+                    ctx.drawLayer { l in
+                        l.addFilter(.blur(radius: 2))
+                        l.stroke(wave, with: .color(p.accent.opacity(0.7)), lineWidth: 2.5)
+                    }
+                    ctx.stroke(wave, with: .color(p.accent), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                } else if waiting {
+                    line(0, size.width, p.waiting, dash: [4, 3])
+                } else {
+                    line(0, size.width * 0.38, p.dim)
+                    line(size.width * 0.62, size.width, p.dim)
+                }
+            }
+        }
+    }
+}
+
+/// A wave pinned at both ends that travels left to right and grows with `level` (0 to about 1).
+/// Two partials, so it looks like sound rather than a test tone.
+func travellingWave(width: CGFloat, mid y: CGFloat, level: Double, time t: Double, scale: CGFloat = 1) -> Path {
+    let amp = (1.2 + min(1, max(0, level)) * Double(y - 2)) * Double(scale)
+    var wave = Path()
+    for i in 0...Int(width) {
+        let x = CGFloat(i), u = Double(x / width)
+        let envelope = pow(sin(Double.pi * u), 0.8)
+        let s = 0.7 * sin(2 * Double.pi * (u * 3 - t * 1.6)) + 0.3 * sin(2 * Double.pi * (u * 7 - t * 2.9))
+        let point = CGPoint(x: x, y: y - CGFloat(envelope * s * amp))
+        if i == 0 { wave.move(to: point) } else { wave.addLine(to: point) }
+    }
+    return wave
+}
+
+// MARK: - Phosphor
+
+/// A small scope screen fed by the sound. Waiting: a dashed amber line with a dot hunting for a trigger. Stopping:
+/// the old TV power-off (the trace collapses to a line, then to a dot, then fades).
+struct ScopeTrace: View {
+    let model: AppModel
+    @Environment(\.palette) private var p
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+            Canvas { ctx, size in
+                let m = model.meter, y = size.height / 2, t = context.date.timeIntervalSinceReferenceDate
+                switch m.mode {
+                case .flowing:
+                    let wave = travellingWave(width: size.width, mid: y, level: m.needle.position, time: t)
+                    ctx.drawLayer { l in l.addFilter(.blur(radius: 2)); l.stroke(wave, with: .color(p.accent.opacity(0.8)), lineWidth: 2.5) }
+                    ctx.stroke(wave, with: .color(p.accent), lineWidth: 1.4)
+                case .waiting:
+                    var l = Path(); l.move(to: CGPoint(x: 0, y: y)); l.addLine(to: CGPoint(x: size.width, y: y))
+                    ctx.stroke(l, with: .color(p.waiting), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                    let q = m.elapsed.truncatingRemainder(dividingBy: 1.6) / 1.6
+                    ctx.fill(Path(ellipseIn: CGRect(x: q * size.width - 1.6, y: y - 1.6, width: 3.2, height: 3.2)), with: .color(Color(hex: 0xFFE2A8)))
+                case .off:
+                    crtOff(ctx, size: size, power: m.backlight, time: t, level: m.needle.position)
+                }
+            }
+        }
+    }
+
+    /// `power` runs from 1 to 0 as the screen switches off: the trace flattens, shrinks to a dot, then fades.
+    private func crtOff(_ ctx: GraphicsContext, size: CGSize, power: Double, time: Double, level: Double) {
+        let y = size.height / 2
+        guard power > 0 else {
+            var l = Path(); l.move(to: CGPoint(x: 0, y: y)); l.addLine(to: CGPoint(x: size.width, y: y))
+            ctx.stroke(l, with: .color(p.dim.opacity(0.6)), lineWidth: 1)
+            return
+        }
+        if power > 0.55 {
+            let wave = travellingWave(width: size.width, mid: y, level: level, time: time, scale: CGFloat((power - 0.55) / 0.45))
+            ctx.stroke(wave, with: .color(p.accent), lineWidth: 1.4)
+        } else if power > 0.25 {
+            let half = size.width / 2 * CGFloat((power - 0.25) / 0.30)
+            var l = Path(); l.move(to: CGPoint(x: size.width / 2 - half, y: y)); l.addLine(to: CGPoint(x: size.width / 2 + half, y: y))
+            ctx.stroke(l, with: .color(p.accent), lineWidth: 1.4)
+        } else {
+            ctx.fill(Path(ellipseIn: CGRect(x: size.width / 2 - 1.6, y: y - 1.6, width: 3.2, height: 3.2)),
+                     with: .color(p.accent2.opacity(power / 0.25)))
+        }
+    }
+}
+
+/// On start(): a bright beam sweeps the status line and leaves an afterglow.
+struct BeamSweep: View {
+    let model: AppModel
+    @Environment(\.palette) private var p
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
+            Canvas { ctx, size in
+                let m = model.meter
+                guard m.mode == .flowing, m.elapsed < 0.95 else { return }
+                let head = size.width * 1.4 * CGFloat(min(1, m.elapsed / 0.35))
+                let fade = m.elapsed < 0.35 ? 1 : max(0, 1 - (m.elapsed - 0.35) / 0.6)
+                let rect = CGRect(x: head - size.width * 0.4, y: size.height / 2 - 1.5, width: size.width * 0.4, height: 3)
+                ctx.drawLayer { l in
+                    l.addFilter(.blur(radius: 1.5))
+                    l.fill(Path(rect), with: .linearGradient(Gradient(colors: [p.accent2.opacity(0), p.accent2.opacity(0.85 * fade)]),
+                                                             startPoint: CGPoint(x: rect.minX, y: 0), endPoint: CGPoint(x: rect.maxX, y: 0)))
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Tally
+
+/// The 3 pt state strip across the top: red on air (wiping in on take()), amber on standby, green when the card is
+/// ready, dark when there is nothing to take.
+struct TallyStrip: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.palette) private var p
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !model.isFlowing)) { _ in
+            GeometryReader { geo in
+                let m = model.meter
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(model.isWaiting ? p.waiting : (model.pass.selected != nil ? p.accent2 : p.bezel))
+                    if model.isFlowing {
+                        let x = min(1, m.elapsed / 0.22)
+                        Rectangle().fill(p.accent).frame(width: geo.size.width * CGFloat(1 - pow(1 - x, 3)))
+                    }
+                }
+            }
+        }
+        .frame(height: 3)
+    }
+}
+
+/// While on air: a red LIVE chip that pops in on take(), and a clock counting how long the card has been live.
+struct OnAir: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.palette) private var p
+    var body: some View {
+        HStack(spacing: 8) {
+            TimelineView(.animation(minimumInterval: 1.0 / 60)) { _ in
+                let x = min(1, model.meter.elapsed / 0.38), c1 = 1.70158, c3 = c1 + 1
+                let pop = 1 + c3 * pow(x - 1, 3) + c1 * pow(x - 1, 2)             // ease out with a little overshoot
+                Text("LIVE").font(.system(size: 10, weight: .heavy).width(.condensed)).tracking(1)
+                    .foregroundColor(Color(hex: 0xFFF3E6))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 3).fill(p.accent))
+                    .scaleEffect(0.6 + 0.4 * pop)
+            }
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text(clockString(Int(context.date.timeIntervalSince(model.flowStartedAt ?? context.date))))
+                    .foregroundColor(p.dim).monospacedDigit()
+                    .help("How long the card has been on air")
+            }
+        }
+    }
+}
+
+// MARK: - Panel
+
+struct NerdView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        let p = Palette.of(model.look)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                HoverLink(text: "nerdpass", color: p.title, bold: true, url: projectURL, open: { model.open($0) })
+                Spacer()
+                Text("v" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"))
+                    .foregroundColor(p.dim)
+                    .help("build " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"))
+            }
+            ForEach(Array(model.entries.enumerated()), id: \.offset) { _, entry in row(entry, p) }
+        }
+        .font(p.font)
+        .foregroundColor(p.text)
+        .padding(12)
+        .padding(.top, p.look == .tally ? 3 : 0)
+        .frame(width: 330)
+        .background(RoundedRectangle(cornerRadius: p.radius).fill(p.bg))
+        .overlay(alignment: .top) {
+            if p.look == .tally { TallyStrip(model: model).clipShape(UnevenRoundedRectangle(topLeadingRadius: p.radius, topTrailingRadius: p.radius)) }
+        }
+        .overlay { chrome(p) }
+        .shadow(color: p.look == .phosphor ? p.accent.opacity(0.15) : .black.opacity(p.look == .needle ? 0.35 : 0.25),
+                radius: p.look == .phosphor ? 6 : 10, y: p.look == .phosphor ? 0 : 5)
+        .padding(EdgeInsets(top: 4, leading: 12, bottom: 18, trailing: 12))     // room for the shadow
+        .environment(\.palette, p)
+    }
+
+    /// The border: Needle's faceplate bezel with an inner highlight, Phosphor's instrument edge, Tally's hairline.
+    @ViewBuilder private func chrome(_ p: Palette) -> some View {
+        switch p.look {
+        case .needle:
+            RoundedRectangle(cornerRadius: p.radius - 1.5).strokeBorder(p.text.opacity(0.06), lineWidth: 1).padding(1.5)
+            RoundedRectangle(cornerRadius: p.radius).strokeBorder(p.bezel, lineWidth: 1.5)
+        case .phosphor, .tally:
+            RoundedRectangle(cornerRadius: p.radius).strokeBorder(p.bezel, lineWidth: 1)
+        }
+    }
+
+    private func statusColor(_ p: Palette) -> Color {
+        switch model.pass.state {
+        case .waiting: return p.waiting
+        case .failed: return p.look == .tally ? p.accent : (p.look == .needle ? p.accent2 : p.waiting)
+        case .flowing: return p.look == .phosphor ? p.accent : p.text
+        case .stopped: return p.dim
+        }
+    }
+
+    @ViewBuilder private func flow(_ status: String, on: Bool, enabled: Bool, _ p: Palette) -> some View {
+        VStack(alignment: .center, spacing: 6) {
+            switch p.look {
+            case .needle:
+                SignalChain(model: model)
+                if !model.isFlowing {
+                    Text(status).foregroundColor(statusColor(p)).lineLimit(1).truncationMode(.middle)
+                }
+            case .phosphor:
+                HStack(spacing: 8) {
+                    ScopeTrace(model: model).frame(width: 44, height: 14)
+                    Text(status.lowercased()).foregroundColor(statusColor(p)).bold().lineLimit(1).truncationMode(.middle)
+                }
+                .padding(.vertical, 2)
+                .overlay { BeamSweep(model: model) }
+            case .tally:
+                if model.isFlowing { OnAir(model: model) }
+                Text(status.lowercased()).foregroundColor(statusColor(p)).lineLimit(1).truncationMode(.middle)
+            }
+            FlowButton(on: on, enabled: enabled) { model.toggle() }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
+    }
+
+    private func item(checked: Bool, symbol: String, title: String, _ p: Palette) -> some View {
+        HStack(spacing: 8) {
+            Text(checked ? ">" : " ").foregroundColor(p.accent).bold()
+            Image(systemName: symbol).frame(width: 16).foregroundColor(checked ? p.accent : p.dim)
+            Text(title).foregroundColor(checked ? p.checkedText : p.text).lineLimit(1).truncationMode(.middle)
+            Spacer()
+        }
+    }
+
+    @ViewBuilder private func row(_ entry: MenuEntry, _ p: Palette) -> some View {
+        switch entry {
+        case let .flow(status, on, enabled):
+            flow(status, on: on, enabled: enabled, p)
+        case .volume:
+            HStack(spacing: 6) {
+                Text("vol").foregroundColor(p.dim)
+                VolumeScale(percent: model.volumePercent) { model.setVolume($0) }
+                Text("\(model.volumePercent)%").foregroundColor(p.text).monospacedDigit()
+                    .frame(width: 38, alignment: .trailing)
+            }.padding(.vertical, 2)
+        case .separator:
+            Separator()
+        case let .header(text):
+            Text(text).foregroundColor(p.dim).padding(.horizontal, 8).padding(.top, 2)
+        case .noInputs:
+            Text("// no audio inputs: plug in your capture card").foregroundColor(p.dim).lineLimit(1)
+        case .permission:
+            RowButton(action: { model.openPrivacySettings() }) {
+                HStack(spacing: 8) {
+                    Text(" ")
+                    Image(systemName: "exclamationmark.triangle.fill").frame(width: 16).foregroundColor(p.waiting)
+                    Text("allow_audio_input…").foregroundColor(p.waiting)
+                    Spacer()
+                    Text("settings ↗").foregroundColor(p.dim)
+                }
+            }
+            .help("Turn on Nerdpass in System Settings > Privacy & Security > Microphone (capture cards count as one)")
+        case let .input(name, symbol, checked):
+            RowButton(action: { model.select(name) }) { item(checked: checked, symbol: symbol, title: name, p) }
+        case let .output(name, symbol, checked):
+            RowButton(action: { model.selectOutput(name) }) { item(checked: checked, symbol: symbol, title: name ?? "system_default", p) }
+                .help(name.map { "Play to \($0)" } ?? "Play to the Mac's current output (follows Sound settings)")
+        case .look:
+            LookPicker(model: model)
+        case .feedback:
+            RowButton(action: { model.openFeedback() }) {
+                HStack(spacing: 8) {
+                    Text(" ").bold()
+                    Image(systemName: "bubble.left.and.text.bubble.right").frame(width: 16).foregroundColor(p.dim)
+                    Text("feedback")
+                    Spacer()
+                    Text("github ↗").foregroundColor(p.dim)
+                }
+            }
+        case let .alwaysOn(on):
+            RowButton(action: model.toggleAlwaysOn) { item(checked: on, symbol: "infinity", title: "always_on", p) }
+                .help("Start the sound every time Nerdpass opens (with open_at_login: whenever you log in)")
+        case let .openAtLogin(on):
+            RowButton(action: model.toggleLogin) { item(checked: on, symbol: "laptopcomputer", title: "open_at_login", p) }
+        case .exit:
+            RowButton(action: { model.onQuit?() }) {
+                HStack(spacing: 8) {
+                    Text(" ").bold()
+                    Image(systemName: "power").frame(width: 16).foregroundColor(p.dim)
+                    Text("exit()")
+                    Spacer()
+                    Text("⌘Q").foregroundColor(p.dim)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Menu bar icon
+
+/// The menu bar icon, per look, in the family's rounded ring. Stopped, it is a template image (macOS tints it).
+/// Needle: a tiny VU meter whose needle follows the sound (orange), or sweeps slowly while waiting (blue).
+/// Phosphor: a scope screen with a live trace (green); waiting, a dot hunts along a dashed line (amber); stopping
+/// plays the TV power-off. Tally: a lamp, solid red and still while on air, blinking amber on standby.
 enum StatusIcon {
     static let size = NSSize(width: 22, height: 22)
 
-    static func image(meter: MeterAnimator, darkMenuBar: Bool) -> NSImage {
-        let template = meter.isIdle
+    static func isTemplate(_ look: Look, _ meter: MeterAnimator) -> Bool {
+        look == .tally ? meter.mode == .off : meter.isIdle
+    }
+
+    static func image(look: Look, meter: MeterAnimator, darkMenuBar: Bool) -> NSImage {
+        let p = Palette.of(look), template = isTemplate(look, meter)
+        let ink: NSColor = template ? .black : (darkMenuBar ? p.inkDarkBarNS : p.inkLightBarNS)
         let img = NSImage(size: size, flipped: true) { _ in
-            let ink: NSColor = template ? .black : (darkMenuBar ? Theme.creamNS : Theme.darkInkNS)
-            let ring: NSColor
-            switch meter.mode {
-            case .flowing: ring = Theme.orangeNS.withAlphaComponent(0.3 + 0.7 * meter.backlight)
-            case .waiting: ring = Theme.blueNS
-            case .off: ring = template ? .black : ink.blended(withFraction: meter.backlight, of: Theme.orangeNS) ?? ink
-            }
-            let frame = NSBezierPath(roundedRect: NSRect(x: 1.5, y: 1.5, width: 19, height: 19), xRadius: 5.5, yRadius: 5.5)
-            frame.lineWidth = 1.8
-            ring.setStroke(); frame.stroke()
-            let pivot = NSPoint(x: 11, y: 17)
-            func point(_ position: Double, _ r: CGFloat) -> NSPoint {
-                let a = (-45 + position * 90) * Double.pi / 180
-                return NSPoint(x: pivot.x + CGFloat(sin(a)) * r, y: pivot.y - CGFloat(cos(a)) * r)
-            }
-            let arc = NSBezierPath()
-            arc.move(to: point(0, 9))
-            for i in 1...16 { arc.line(to: point(Double(i) / 16, 9)) }
-            arc.lineWidth = 1.2
-            (meter.mode == .off ? ink : ring).setStroke(); arc.stroke()
-            let needle = NSBezierPath()
-            needle.move(to: pivot); needle.line(to: point(min(1.08, meter.needle.position), 10))
-            needle.lineWidth = 1.4; needle.lineCapStyle = .round
-            ink.setStroke(); needle.stroke()
-            if !template, meter.needle.position > needleRedZone {
-                Theme.redNS.setFill()
-                NSBezierPath(ovalIn: NSRect(x: 16.2, y: 7.6, width: 2.8, height: 2.8)).fill()
+            switch look {
+            case .needle: drawNeedle(meter, p, ink, template)
+            case .phosphor: drawPhosphor(meter, p, ink, template)
+            case .tally: drawTally(meter, p, ink, template)
             }
             return true
         }
         img.isTemplate = template
         return img
+    }
+
+    private static func ring(_ color: NSColor) {
+        let frame = NSBezierPath(roundedRect: NSRect(x: 1.5, y: 1.5, width: 19, height: 19), xRadius: 5.5, yRadius: 5.5)
+        frame.lineWidth = 1.8
+        color.setStroke(); frame.stroke()
+    }
+
+    private static func drawNeedle(_ meter: MeterAnimator, _ p: Palette, _ ink: NSColor, _ template: Bool) {
+        let ringColor: NSColor
+        switch meter.mode {
+        case .flowing: ringColor = p.accentNS.withAlphaComponent(0.3 + 0.7 * meter.backlight)
+        case .waiting: ringColor = p.waitingNS
+        case .off: ringColor = template ? .black : ink.blended(withFraction: meter.backlight, of: p.accentNS) ?? ink
+        }
+        ring(ringColor)
+        let pivot = NSPoint(x: 11, y: 17)
+        func point(_ position: Double, _ r: CGFloat) -> NSPoint {
+            let a = (-45 + position * 90) * Double.pi / 180
+            return NSPoint(x: pivot.x + CGFloat(sin(a)) * r, y: pivot.y - CGFloat(cos(a)) * r)
+        }
+        let arc = NSBezierPath()
+        arc.move(to: point(0, 9))
+        for i in 1...16 { arc.line(to: point(Double(i) / 16, 9)) }
+        arc.lineWidth = 1.2
+        (meter.mode == .off ? ink : ringColor).setStroke(); arc.stroke()
+        let needle = NSBezierPath()
+        needle.move(to: pivot); needle.line(to: point(min(1.08, meter.needle.position), 10))
+        needle.lineWidth = 1.4; needle.lineCapStyle = .round
+        ink.setStroke(); needle.stroke()
+        if !template, meter.needle.position > needleRedZone {
+            p.accent2NS.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 16.2, y: 7.6, width: 2.8, height: 2.8)).fill()
+        }
+    }
+
+    private static func drawPhosphor(_ meter: MeterAnimator, _ p: Palette, _ ink: NSColor, _ template: Bool) {
+        let screen = NSBezierPath(roundedRect: NSRect(x: 2, y: 4, width: 18, height: 14), xRadius: 4, yRadius: 4)
+        screen.lineWidth = 1.5
+        let bezel: NSColor = template ? .black : (meter.mode == .waiting ? p.waitingNS : p.accentNS.withAlphaComponent(0.75))
+        bezel.setStroke(); screen.stroke()
+        NSGraphicsContext.saveGraphicsState()
+        screen.addClip()
+        let trace = NSBezierPath(); trace.lineWidth = 1.6; trace.lineCapStyle = .round
+        let t = Date().timeIntervalSinceReferenceDate
+        func wave(_ scale: Double) {
+            let amp = (1 + min(1, meter.needle.position) * 4.5) * scale
+            for i in 0...28 {
+                let x = 3 + CGFloat(i) * 0.57
+                let y = 11 - CGFloat(sin(Double(i) / 28 * Double.pi * 3 + t * 2 * Double.pi) * amp)
+                i == 0 ? trace.move(to: NSPoint(x: x, y: y)) : trace.line(to: NSPoint(x: x, y: y))
+            }
+        }
+        switch meter.mode {
+        case .flowing:
+            wave(1); ink.setStroke(); trace.stroke()
+        case .waiting:
+            trace.move(to: NSPoint(x: 4, y: 11)); trace.line(to: NSPoint(x: 18, y: 11))
+            trace.setLineDash([1.5, 1.5], count: 2, phase: 0); trace.lineWidth = 1.2
+            p.waitingNS.setStroke(); trace.stroke()
+            let q = meter.elapsed.truncatingRemainder(dividingBy: 1.6) / 1.6
+            NSColor(hex: 0xFFE2A8).setFill()
+            NSBezierPath(ovalIn: NSRect(x: 4 + 14 * q - 1.4, y: 9.6, width: 2.8, height: 2.8)).fill()
+        case .off:
+            let power = meter.backlight
+            if template || power == 0 {
+                trace.move(to: NSPoint(x: 4, y: 11)); trace.line(to: NSPoint(x: 18, y: 11)); ink.setStroke(); trace.stroke()
+            } else if power > 0.55 {
+                wave((power - 0.55) / 0.45); ink.setStroke(); trace.stroke()
+            } else if power > 0.25 {
+                let half = 7 * CGFloat((power - 0.25) / 0.30)
+                trace.move(to: NSPoint(x: 11 - half, y: 11)); trace.line(to: NSPoint(x: 11 + half, y: 11)); ink.setStroke(); trace.stroke()
+            } else {
+                p.accent2NS.withAlphaComponent(power / 0.25).setFill()
+                NSBezierPath(ovalIn: NSRect(x: 9.6, y: 9.6, width: 2.8, height: 2.8)).fill()
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private static func drawTally(_ meter: MeterAnimator, _ p: Palette, _ ink: NSColor, _ template: Bool) {
+        let lamp = NSBezierPath(ovalIn: NSRect(x: 5.8, y: 5.8, width: 10.4, height: 10.4))
+        lamp.lineWidth = 1.6
+        switch meter.mode {
+        case .flowing:
+            ring(p.accentNS); p.accentNS.setFill(); lamp.fill()
+        case .waiting:
+            ring(p.waitingNS)
+            if Int(meter.elapsed / 0.5) % 2 == 0 { p.waitingNS.setStroke(); lamp.stroke() }      // hard 1 Hz blink
+        case .off:
+            ring(ink); ink.setStroke(); lamp.stroke()
+        }
     }
 }
 
@@ -694,8 +1110,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for output in listOutputs() { print("  ", output.name, " [\(output.id)]") }
             exit(0)
         }
+        // `--snapshot-icons <file.png>` renders the menu bar icon of every look (stopped, flowing, waiting, and the
+        // moment after stopping) on a light and a dark menu bar, at 4x, and quits.
+        if let i = args.firstIndex(of: "--snapshot-icons"), args.indices.contains(i + 1) {
+            snapshotIcons(to: URL(fileURLWithPath: args[i + 1]))
+            exit(0)
+        }
         // `--snapshot <file.png>` renders the panel to an image and quits (for checking the UI without clicking).
-        // With `--demo` it shows made-up inputs with the sound on, and leaves the settings alone (for the README).
+        // With `--demo` it shows made-up inputs with the sound on, and leaves the settings alone (for the README);
+        // `--look needle|phosphor|tally` picks the look.
         if let i = args.firstIndex(of: "--snapshot"), args.indices.contains(i + 1) {
             let shown: AppModel
             if args.contains("--demo") {
@@ -705,10 +1128,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                          AudioInput(id: "usb", name: "USB Audio Interface")])
                 shown.pass.updateOutputs([AudioOutput(id: "spk", name: "MacBook Pro Speakers"),
                                           AudioOutput(id: "phones", name: "AirPods Pro")])
+                if let j = args.firstIndex(of: "--look"), args.indices.contains(j + 1), let look = Look(rawValue: args[j + 1]) {
+                    shown.pass.setLook(look)
+                }
                 shown.pass.start()
                 shown.refresh()
+                shown.flowStartedAt = Date().addingTimeInterval(-764)
                 for _ in 0..<60 { shown.stepMeter(1.0 / 30) }
-                UserDefaults().removePersistentDomain(forName: "nerdpass-demo")
             } else {
                 shown = model
                 shown.outputsChanged()
@@ -716,11 +1142,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             shown.refresh()
             snapshot(shown, to: URL(fileURLWithPath: args[i + 1]))
+            UserDefaults().removePersistentDomain(forName: "nerdpass-demo")
             exit(0)
         }
 
         if let button = statusItem.button {
-            button.image = StatusIcon.image(meter: model.meter, darkMenuBar: isDarkMenuBar)
+            button.image = StatusIcon.image(look: model.look, meter: model.meter, darkMenuBar: isDarkMenuBar)
             button.imageScaling = .scaleNone
             button.toolTip = "Nerdpass"
             button.target = self
@@ -749,6 +1176,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         model.pass.shutdown()
+    }
+
+    private func snapshotIcons(to url: URL) {
+        func meter(_ mode: MeterAnimator.Mode, seconds: Double, then: MeterAnimator.Mode? = nil, after: Double = 0) -> MeterAnimator {
+            var m = MeterAnimator()
+            m.setMode(mode)
+            for _ in 0..<Int(seconds * 30) { m.step(dt: 1.0 / 30, level: 0.75) }
+            if let then { m.setMode(then); for _ in 0..<Int(after * 30) { m.step(dt: 1.0 / 30, level: 0.75) } }
+            return m
+        }
+        let states = [meter(.off, seconds: 0), meter(.flowing, seconds: 2), meter(.waiting, seconds: 1.2),
+                      meter(.flowing, seconds: 2, then: .off, after: 0.12)]
+        let cell: CGFloat = 26, scale: CGFloat = 4
+        let size = NSSize(width: cell * CGFloat(states.count * 2), height: cell * CGFloat(Look.allCases.count))
+        let image = NSImage(size: NSSize(width: size.width * scale, height: size.height * scale), flipped: true) { _ in
+            NSGraphicsContext.current?.cgContext.scaleBy(x: scale, y: scale)
+            for (row, look) in Look.allCases.enumerated() {
+                for (dark, bar) in [(false, NSColor(white: 0.92, alpha: 1)), (true, NSColor(white: 0.17, alpha: 1))].enumerated().map({ ($0.element.0, $0.element.1) }) {
+                    for (col, m) in states.enumerated() {
+                        let x = CGFloat(col + (dark ? states.count : 0)) * cell, y = CGFloat(row) * cell
+                        bar.setFill(); NSRect(x: x, y: y, width: cell, height: cell).fill()
+                        let icon = StatusIcon.image(look: look, meter: m, darkMenuBar: dark)
+                        let r = NSRect(x: x + 2, y: y + 2, width: 22, height: 22)
+                        if icon.isTemplate {
+                            // Tinted like macOS does: black on a light bar, white on a dark one.
+                            let tinted = NSImage(size: icon.size, flipped: false) { rect in
+                                icon.draw(in: rect); (dark ? NSColor.white : NSColor.black).set(); rect.fill(using: .sourceAtop); return true
+                            }
+                            tinted.draw(in: r)
+                        } else { icon.draw(in: r) }
+                    }
+                }
+            }
+            return true
+        }
+        if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) { try? png.write(to: url) }
     }
 
     private func snapshot(_ model: AppModel, to url: URL) {
@@ -784,7 +1248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusIcon() {
         statusItem.button?.toolTip = "Nerdpass: " + statusLine(model.pass.state, output: model.pass.selectedOutput?.name)
         model.stepMeter(0)
-        statusItem.button?.image = StatusIcon.image(meter: model.meter, darkMenuBar: isDarkMenuBar)
+        statusItem.button?.image = StatusIcon.image(look: model.look, meter: model.meter, darkMenuBar: isDarkMenuBar)
         guard iconTimer == nil, !model.meter.isIdle else { return }
         lastTick = Date()
         let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] timer in
@@ -792,7 +1256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let now = Date()
             self.model.stepMeter(now.timeIntervalSince(self.lastTick))
             self.lastTick = now
-            self.statusItem.button?.image = StatusIcon.image(meter: self.model.meter, darkMenuBar: self.isDarkMenuBar)
+            self.statusItem.button?.image = StatusIcon.image(look: self.model.look, meter: self.model.meter, darkMenuBar: self.isDarkMenuBar)
             if self.model.meter.isIdle { timer.invalidate(); self.iconTimer = nil }
         }
         RunLoop.main.add(t, forMode: .common)

@@ -13,6 +13,8 @@ public enum MenuEntry: Equatable {
     case output(name: String?, symbol: String, checked: Bool)
     /// Microphone access was refused; clicking opens the Privacy settings.
     case permission
+    /// The look picker: needle, phosphor or tally.
+    case look(Look)
     case feedback
     /// Start the sound every time Nerdpass opens.
     case alwaysOn(on: Bool)
@@ -29,12 +31,14 @@ public struct MenuState {
     /// The picked output if connected; nil plays to the default output.
     public var selectedOutputID: String?
     public var volumePercent: Int
+    public var look: Look
     public var alwaysOn: Bool
     public var openAtLogin: Bool
     public var accessDenied: Bool
     public init(flow: FlowState, inputs: [AudioInput], selectedID: String?, outputs: [AudioOutput] = [],
-                selectedOutputID: String? = nil, volumePercent: Int,
+                selectedOutputID: String? = nil, volumePercent: Int, look: Look = .needle,
                 alwaysOn: Bool, openAtLogin: Bool, accessDenied: Bool = false) {
+        self.look = look
         self.flow = flow; self.inputs = inputs; self.selectedID = selectedID
         self.outputs = outputs; self.selectedOutputID = selectedOutputID
         self.volumePercent = volumePercent; self.alwaysOn = alwaysOn; self.openAtLogin = openAtLogin
@@ -46,7 +50,7 @@ public let captureCardSymbol = "tv"
 public let otherInputSymbol = "mic"
 
 /// Start/stop and the volume first, then the inputs (capture cards before microphones), then the outputs (the
-/// Mac's default first), then feedback, always on, open at login, and Exit last.
+/// Mac's default first), then the look, feedback, always on, open at login, and Exit last.
 public func menuEntries(for s: MenuState) -> [MenuEntry] {
     var items: [MenuEntry] = [
         .flow(status: statusLine(s.flow, output: s.outputs.first { $0.id == s.selectedOutputID }?.name), on: s.flow.isOn, enabled: s.flow.isOn || !s.inputs.isEmpty),
@@ -67,6 +71,7 @@ public func menuEntries(for s: MenuState) -> [MenuEntry] {
         items.append(.output(name: output.name, symbol: outputSymbol(output.name), checked: output.id == s.selectedOutputID))
     }
     items.append(.separator)
+    items.append(.look(s.look))
     items.append(.feedback)
     items.append(.alwaysOn(on: s.alwaysOn))
     items.append(.openAtLogin(on: s.openAtLogin))

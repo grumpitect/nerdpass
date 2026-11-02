@@ -29,6 +29,11 @@ public final class PassSettings {
         get { defaults.string(forKey: "outputName") }
         set { defaults.set(newValue, forKey: "outputName") }
     }
+    /// The look (needle by default).
+    public var look: Look {
+        get { defaults.string(forKey: "look").flatMap(Look.init(rawValue:)) ?? .needle }
+        set { defaults.set(newValue.rawValue, forKey: "look") }
+    }
     /// Always on: Nerdpass starts the sound every time it opens (on by default).
     public var alwaysOn: Bool {
         get { defaults.object(forKey: "alwaysOn") == nil ? true : defaults.bool(forKey: "alwaysOn") }

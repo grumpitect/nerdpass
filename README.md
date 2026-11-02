@@ -13,16 +13,26 @@ Made for the [Nerdative](https://www.youtube.com/@nerdative) channel on YouTube.
 on your stream means a lot.
 
 <p align="center">
-  <img src="docs/panel-0.1.0.png" width="340" alt="Nerdpass panel">
+  <img src="docs/look-needle.png" width="270" alt="Nerdpass in the needle look">
+  <img src="docs/look-phosphor.png" width="270" alt="Nerdpass in the phosphor look">
+  <img src="docs/look-tally.png" width="270" alt="Nerdpass in the tally look">
 </p>
 
 ## Features
 
-- **A VU meter in your menu bar.** No Dock icon, no window. The menu bar icon is a tiny analog meter: its needle
-  swings with the card's sound while it plays, sweeps slowly in blue while Nerdpass waits for the card, and rests
-  (tinted like any other menu bar icon) when stopped. Click it for a panel styled like a backlit hi-fi faceplate.
-- **See the signal path.** The panel draws the cable from your card to your speakers: a live waveform travels
-  along it while sound flows, growing with the sound, and it shows unplugged when stopped.
+- **Menu bar only.** No Dock icon, no window. The menu bar icon follows the card's sound while it plays, shows when
+  Nerdpass is waiting for the card, and rests (tinted like any other menu bar icon) when stopped. Click it for the
+  panel.
+- **Three looks.** Pick one under `look` in the panel:
+  - **needle** (the default): a backlit analog VU meter on a walnut faceplate. The menu bar icon is a tiny meter
+    whose needle swings with the sound, and the panel draws the cable from your card to your speakers with a live
+    waveform travelling along it. Starting warms the meter up with a flicker and kicks the needle to +3.
+  - **phosphor**: an oscilloscope, green trace on a dark CRT. The menu bar icon is a scope screen with a live trace;
+    waiting, a dot hunts along a dashed line. start() sweeps a beam across the panel, and stop() plays the old TV
+    power-off.
+  - **tally**: a broadcast switcher. take() wipes a red on-air strip across the panel and lights a LIVE chip with a
+    clock of how long the card has been on air; cut() switches off in one frame. The menu bar icon is a tally lamp:
+    solid red on air, blinking amber on standby. The fader is labelled in dB.
 - **Start and stop** with one button (or Space while the panel is open).
 - **Volume** from 0 to 100%, 80% by default (100% is the card's own level). The scale follows VLC's cubic curve,
   so 50% sounds about half as loud. The meter shows the card's level before the volume.
@@ -103,14 +113,16 @@ certificate fixes that:
 ~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --list-inputs                  # audio inputs (★ = capture card) and outputs
 ~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --start                        # launch with the sound on, even with always_on off
 ~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --snapshot panel.png           # render the panel to an image
-~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --snapshot panel.png --demo    # the same, with made-up inputs
+~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --snapshot panel.png --demo --look tally   # made-up inputs, any look
+~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --snapshot-icons icons.png     # every menu bar icon state
 ```
 
 ## Development
 
 ```bash
-swift test      # 36 tests: capture card detection, picking the input and output, start/stop, unplug and replug,
-                # always on at launch, volume curve, settings, menu layout, meter scale and needle ballistics
+swift test      # 40 tests: capture card detection, picking the input and output, start/stop, unplug and replug,
+                # always on at launch, volume curve, settings, menu layout, meter scale and needle ballistics,
+                # looks (labels, on-air clock, dB scale)
 swift build
 ```
 
