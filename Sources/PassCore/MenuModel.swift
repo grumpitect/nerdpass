@@ -13,7 +13,7 @@ public enum MenuEntry: Equatable {
     case output(name: String?, symbol: String, checked: Bool)
     /// Microphone access was refused; clicking opens the Privacy settings.
     case permission
-    /// The look picker: needle, phosphor or tally.
+    /// The look picker: burst, needle, phosphor or tally.
     case look(Look)
     case feedback
     /// Start the sound every time Nerdpass opens.
@@ -36,7 +36,7 @@ public struct MenuState {
     public var openAtLogin: Bool
     public var accessDenied: Bool
     public init(flow: FlowState, inputs: [AudioInput], selectedID: String?, outputs: [AudioOutput] = [],
-                selectedOutputID: String? = nil, volumePercent: Int, look: Look = .needle,
+                selectedOutputID: String? = nil, volumePercent: Int, look: Look = .burst,
                 alwaysOn: Bool, openAtLogin: Bool, accessDenied: Bool = false) {
         self.look = look
         self.flow = flow; self.inputs = inputs; self.selectedID = selectedID

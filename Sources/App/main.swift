@@ -368,7 +368,13 @@ struct Palette {
     let inkDarkBarNS: NSColor, inkLightBarNS: NSColor
     let font = Font.system(size: 13, design: .monospaced)
     /// The volume percent's color while boosting past 100%.
-    var boost: Color { look == .tally ? waiting : accent2 }
+    var boost: Color {
+        switch look {
+        case .tally: return waiting
+        case .burst: return Color(hex: 0xD6F6FF)      // white-hot
+        case .needle, .phosphor: return accent2
+        }
+    }
 
     static let needle = Palette(
         look: .needle, bg: Color(hex: 0x16120C), surface: Color(hex: 0x221B12), text: Color(hex: 0xF4E9D4),
@@ -391,17 +397,28 @@ struct Palette {
         hover: Color(hex: 0xF2ECE4, alpha: 0.06), radius: 10,
         accentNS: NSColor(hex: 0xFF4A3D), accent2NS: NSColor(hex: 0x3DDC84), waitingNS: NSColor(hex: 0xFFB020),
         inkDarkBarNS: NSColor(hex: 0xF2ECE4), inkLightBarNS: NSColor(hex: 0x1B1B1D))
+    static let burst = Palette(
+        look: .burst, bg: Color(hex: 0x141C30), surface: Color(hex: 0x1B2540), text: Color(hex: 0xE3EEFF),
+        dim: Color(hex: 0x7D8DB0), accent: Color(hex: 0x3FD8FF), accent2: Color(hex: 0x2F7BFF), waiting: Color(hex: 0xB48CFF),
+        bezel: Color(hex: 0x2A3658), line: Color(hex: 0x26314F), title: Color(hex: 0x3FD8FF), checkedText: Color(hex: 0x3FD8FF),
+        hover: Color(hex: 0x3FD8FF, alpha: 0.10), radius: 16,
+        accentNS: NSColor(hex: 0x3FD8FF), accent2NS: NSColor(hex: 0x2F7BFF), waitingNS: NSColor(hex: 0xB48CFF),
+        inkDarkBarNS: NSColor(hex: 0x3FD8FF), inkLightBarNS: NSColor(hex: 0x1F6FE0))
+
+    /// Burst's glow: cyan into electric blue, like the app icon's wave.
+    var glow: LinearGradient { LinearGradient(colors: [accent, accent2], startPoint: .leading, endPoint: .trailing) }
 
     static func of(_ look: Look) -> Palette {
         switch look {
         case .needle: return .needle
         case .phosphor: return .phosphor
         case .tally: return .tally
+        case .burst: return .burst
         }
     }
 }
 
-private struct PaletteKey: EnvironmentKey { static let defaultValue = Palette.needle }
+private struct PaletteKey: EnvironmentKey { static let defaultValue = Palette.burst }
 extension EnvironmentValues {
     var palette: Palette {
         get { self[PaletteKey.self] }
@@ -493,6 +510,15 @@ struct FlowButton: View {
                 .foregroundColor(!enabled ? p.dim.opacity(0.6) : (on ? Color(hex: 0xFFF3E6) : (hover ? p.bg : p.accent2)))
                 .background(RoundedRectangle(cornerRadius: 6).fill(fill))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(!enabled ? p.bezel : (on ? p.accent : p.accent2)))
+        case .burst:
+            // A pill: outlined in the glow when stopped, filled with it when on (and on hover).
+            let filled = enabled && (on || hover)
+            Text(title).bold()
+                .frame(width: 130, height: 30)
+                .foregroundColor(!enabled ? p.dim.opacity(0.6) : (filled ? Color(hex: 0x0B1222) : p.accent))
+                .background(Capsule().fill(filled ? AnyShapeStyle(p.glow) : AnyShapeStyle(Color.clear)).opacity(on && hover ? 0.85 : 1))
+                .overlay(Capsule().strokeBorder(enabled ? AnyShapeStyle(p.glow) : AnyShapeStyle(p.bezel), lineWidth: 1.2))
+                .shadow(color: on ? p.accent.opacity(0.45) : .clear, radius: 6)
         }
     }
 }
@@ -517,6 +543,10 @@ struct Separator: View {
                 ctx.fill(Path(CGRect(x: size.width / 2 - 0.5, y: y - 2.5, width: 1, height: 5)), with: .color(p.accent.opacity(0.6)))
             case .tally:
                 ctx.fill(Path(CGRect(x: 0, y: y - 0.5, width: size.width, height: 1)), with: .color(p.line))
+            case .burst:
+                ctx.fill(Path(CGRect(x: 0, y: y - 0.5, width: size.width, height: 1)),
+                         with: .linearGradient(Gradient(colors: [p.accent.opacity(0), p.accent.opacity(0.35), p.accent2.opacity(0.35), p.accent2.opacity(0)]),
+                                               startPoint: .zero, endPoint: CGPoint(x: size.width, y: 0)))
             }
         }
         .frame(height: 5).padding(.vertical, 4)
@@ -540,6 +570,7 @@ struct VolumeScale: View {
                 case .needle: drawNeedle(ctx, size)
                 case .phosphor: drawPhosphor(ctx, size)
                 case .tally: drawTally(ctx, size)
+                case .burst: drawBurst(ctx, size)
                 }
             }
             .contentShape(Rectangle())
@@ -613,6 +644,28 @@ struct VolumeScale: View {
         ctx.draw(Text("1x").font(.system(size: 7, design: .monospaced)).foregroundColor(p.dim), at: CGPoint(x: unity * w + 7, y: y + 6))
     }
 
+    /// Burst: a soft track filled with the glow up to 1x, burning white-hot into the boost, with a glowing knob.
+    private func drawBurst(_ ctx: GraphicsContext, _ size: CGSize) {
+        let w = size.width, y: CGFloat = 9
+        ctx.fill(Path(roundedRect: CGRect(x: 0, y: y - 2, width: w, height: 4), cornerRadius: 2), with: .color(p.line.opacity(hover ? 1.6 : 1)))
+        let lit = Path(roundedRect: CGRect(x: 0, y: y - 2, width: max(4, v * w), height: 4), cornerRadius: 2)
+        let shading = GraphicsContext.Shading.linearGradient(
+            Gradient(stops: [.init(color: p.accent, location: 0), .init(color: p.accent2, location: unity),
+                             .init(color: p.boost, location: 1)]),
+            startPoint: .zero, endPoint: CGPoint(x: w, y: 0))
+        ctx.drawLayer { l in l.addFilter(.blur(radius: 3)); l.fill(lit, with: shading) }
+        ctx.fill(lit, with: shading)
+        ctx.fill(Path(CGRect(x: unity * w - 0.5, y: y - 5, width: 1, height: 10)), with: .color(p.dim.opacity(0.8)))
+        let kx = min(w - 5, max(5, v * w))
+        let knob = CGRect(x: kx - 5, y: y - 5, width: 10, height: 10)
+        ctx.drawLayer { l in l.addFilter(.blur(radius: 4)); l.fill(Path(ellipseIn: knob.insetBy(dx: -2, dy: -2)), with: .color(percent > 100 ? p.boost : p.accent)) }
+        ctx.fill(Path(ellipseIn: knob), with: .color(.white))
+        for (label, at) in [("1x", unity), ("2x", 1.0)] {
+            ctx.draw(Text(label).font(.system(size: 8, design: .monospaced)).foregroundColor(at > unity ? p.boost.opacity(0.8) : p.dim),
+                     at: CGPoint(x: min(w - 6, at * w), y: y + 12))
+        }
+    }
+
     private func drawTally(_ ctx: GraphicsContext, _ size: CGSize) {
         let w = size.width, y: CGFloat = 8
         ctx.fill(Path(roundedRect: CGRect(x: 0, y: y - 2, width: w, height: 4), cornerRadius: 2), with: .color(p.line))
@@ -661,11 +714,19 @@ struct LookPicker: View {
         HStack(spacing: 8) {
             Text(" ").bold()
             Image(systemName: "paintpalette").frame(width: 16).foregroundColor(p.dim)
-            Text("look")
-            Spacer()
-            ForEach(Look.allCases, id: \.self) { look in
-                LookChoice(name: look.rawValue, chosen: look == model.look) { model.setLook(look) }
+            Text("look").fixedSize()
+            Spacer(minLength: 4)
+            // Two rows of two, so the names never wrap.
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
+                ForEach(0..<(Look.allCases.count + 1) / 2, id: \.self) { row in
+                    GridRow {
+                        ForEach(Look.allCases[(row * 2)..<min(row * 2 + 2, Look.allCases.count)], id: \.self) { look in
+                            LookChoice(name: look.rawValue, chosen: look == model.look) { model.setLook(look) }
+                        }
+                    }
+                }
             }
+            .fixedSize()
         }
         .padding(.horizontal, 8).padding(.vertical, 3)
     }
@@ -680,6 +741,7 @@ struct LookChoice: View {
     var body: some View {
         Button(action: action) {
             Text(name).foregroundColor(chosen ? p.accent : (hover ? p.text : p.dim)).bold(chosen).underline(hover && !chosen)
+                .lineLimit(1)
         }
         .buttonStyle(.plain)
         .focusable(false)
@@ -869,6 +931,44 @@ struct TallyStrip: View {
     }
 }
 
+// MARK: - Burst
+
+/// Burst's wave: the same wave as the other looks, glowing cyan into blue like the app icon. Flat at silence and
+/// growing with the sound; stopping fades it back to a flat line; waiting, a violet dashed line breathes.
+struct BurstWave: View {
+    let model: AppModel
+    @Environment(\.palette) private var p
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+            Canvas { ctx, size in
+                let m = model.meter, y = size.height / 2
+                let shading = GraphicsContext.Shading.linearGradient(Gradient(colors: [p.accent, p.accent2]),
+                                                                     startPoint: .zero, endPoint: CGPoint(x: size.width, y: 0))
+                var flat = Path(); flat.move(to: CGPoint(x: 0, y: y)); flat.addLine(to: CGPoint(x: size.width, y: y))
+                switch m.mode {
+                case .flowing:
+                    let wave = travellingWave(width: size.width, mid: y, level: m.needle.position,
+                                              time: context.date.timeIntervalSinceReferenceDate)
+                    ctx.drawLayer { l in
+                        l.addFilter(.blur(radius: 2))
+                        l.stroke(wave, with: shading, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+                    }
+                    ctx.stroke(wave, with: shading, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                case .waiting:
+                    let breath = 0.35 + 0.55 * (0.5 - 0.5 * cos(2 * Double.pi * m.elapsed / 2.4))
+                    ctx.stroke(flat, with: .color(p.waiting.opacity(breath)), style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
+                case .off:
+                    if m.backlight > 0 {
+                        var faded = ctx; faded.opacity = m.backlight
+                        faded.stroke(flat, with: shading, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    }
+                    ctx.stroke(flat, with: .color(p.dim.opacity(0.6 * (1 - m.backlight))), lineWidth: 1.2)
+                }
+            }
+        }
+    }
+}
+
 /// While on air: a red LIVE chip that pops in on take(), and a clock counting how long the card has been live.
 struct OnAir: View {
     @ObservedObject var model: AppModel
@@ -914,13 +1014,16 @@ struct NerdView: View {
         .foregroundColor(p.text)
         .padding(12)
         .frame(width: 330)
-        .background(RoundedRectangle(cornerRadius: p.radius).fill(p.bg))
+        .background(RoundedRectangle(cornerRadius: p.radius).fill(p.look == .burst
+            ? AnyShapeStyle(LinearGradient(colors: [Color(hex: 0x1C2745), Color(hex: 0x111829)], startPoint: .top, endPoint: .bottom))
+            : AnyShapeStyle(p.bg)))
         .overlay(alignment: .top) {
             if p.look == .tally { TallyStrip(model: model).clipShape(UnevenRoundedRectangle(topLeadingRadius: p.radius, topTrailingRadius: p.radius)) }
         }
         .overlay { chrome(p) }
-        .shadow(color: p.look == .phosphor ? p.accent.opacity(0.15) : .black.opacity(p.look == .needle ? 0.35 : 0.25),
-                radius: p.look == .phosphor ? 6 : 10, y: p.look == .phosphor ? 0 : 5)
+        .shadow(color: p.look == .phosphor ? p.accent.opacity(0.15) : p.look == .burst ? p.accent.opacity(0.18)
+                    : .black.opacity(p.look == .needle ? 0.35 : 0.25),
+                radius: p.look == .phosphor ? 6 : 10, y: p.look == .phosphor || p.look == .burst ? 0 : 5)
         .padding(EdgeInsets(top: 4, leading: 12, bottom: 18, trailing: 12))     // room for the shadow
         .environment(\.palette, p)
     }
@@ -933,6 +1036,10 @@ struct NerdView: View {
             RoundedRectangle(cornerRadius: p.radius).strokeBorder(p.bezel, lineWidth: 1.5)
         case .phosphor, .tally:
             RoundedRectangle(cornerRadius: p.radius).strokeBorder(p.bezel, lineWidth: 1)
+        case .burst:
+            RoundedRectangle(cornerRadius: p.radius).strokeBorder(p.bezel, lineWidth: 1)
+            RoundedRectangle(cornerRadius: p.radius - 1).strokeBorder(
+                LinearGradient(colors: [.white.opacity(0.09), .clear], startPoint: .top, endPoint: .center), lineWidth: 1).padding(1)
         }
     }
 
@@ -940,7 +1047,7 @@ struct NerdView: View {
         switch model.pass.state {
         case .waiting: return p.waiting
         case .failed: return p.look == .tally ? p.accent : (p.look == .needle ? p.accent2 : p.waiting)
-        case .flowing: return p.look == .phosphor ? p.accent : p.text
+        case .flowing: return p.look == .phosphor || p.look == .burst ? p.accent : p.text
         case .stopped: return p.dim
         }
     }
@@ -964,6 +1071,11 @@ struct NerdView: View {
                 // One row, like the other looks: LIVE and the clock lead while on air.
                 HStack(spacing: 8) {
                     if model.isFlowing { OnAir(model: model).fixedSize() }
+                    Text(status.lowercased()).foregroundColor(statusColor(p)).lineLimit(1).truncationMode(.middle)
+                }
+            case .burst:
+                HStack(spacing: 8) {
+                    BurstWave(model: model).frame(width: 50, height: 18)
                     Text(status.lowercased()).foregroundColor(statusColor(p)).lineLimit(1).truncationMode(.middle)
                 }
             }
@@ -1068,6 +1180,7 @@ enum StatusIcon {
             case .needle: drawNeedle(meter, p, ink, template)
             case .phosphor: drawPhosphor(meter, p, ink, template)
             case .tally: drawTally(meter, p, ink, template)
+            case .burst: drawBurst(meter, p, ink, template)
             }
             return true
         }
@@ -1152,6 +1265,40 @@ enum StatusIcon {
             }
         }
         NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// Burst: just the wave, as large as Phosphor's (16 pt wide, up to 5 pt either way) and smooth (no ripple), with
+    /// no frame. Stopped, it shows a still wave (tinted by macOS) so the icon stays recognizable; playing, it is flat at
+    /// silence and grows with the sound, cyan into blue; waiting, it breathes in violet.
+    private static func drawBurst(_ meter: MeterAnimator, _ p: Palette, _ ink: NSColor, _ template: Bool) {
+        let t = Date().timeIntervalSinceReferenceDate
+        let wave = NSBezierPath(); wave.lineWidth = 1.8; wave.lineCapStyle = .round; wave.lineJoinStyle = .round
+        func shape(_ level: Double, _ time: Double) {
+            for i in 0...64 {
+                let u = Double(i) / 64
+                let point = NSPoint(x: 3 + 16 * CGFloat(u), y: 11 - CGFloat(waveHeight(at: u, level: level, time: time, ripple: false) * 5))
+                i == 0 ? wave.move(to: point) : wave.line(to: point)
+            }
+        }
+        switch meter.mode {
+        case .flowing:
+            shape(meter.needle.position, t)
+            NSGradient(colors: [p.accentNS, p.accent2NS])?.draw(in: strokeOutline(wave), angle: 0)
+        case .waiting:
+            shape(0.55, meter.elapsed * 0.4)
+            p.waitingNS.withAlphaComponent(0.4 + 0.5 * (0.5 - 0.5 * cos(2 * Double.pi * meter.elapsed / 2.4))).setStroke()
+            wave.stroke()
+        case .off:
+            shape(template ? 0.55 : 0.55 * meter.backlight, 0.1)
+            (template ? NSColor.black : p.accentNS.withAlphaComponent(max(0.3, meter.backlight))).setStroke()
+            wave.stroke()
+        }
+    }
+
+    /// The stroke of a path as a fillable outline (so a gradient can be drawn along it).
+    private static func strokeOutline(_ path: NSBezierPath) -> NSBezierPath {
+        let cg = path.cgPath.copy(strokingWithWidth: path.lineWidth, lineCap: .round, lineJoin: .round, miterLimit: 10)
+        return NSBezierPath(cgPath: cg)
     }
 
     private static func drawTally(_ meter: MeterAnimator, _ p: Palette, _ ink: NSColor, _ template: Bool) {

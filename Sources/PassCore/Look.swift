@@ -1,8 +1,11 @@
 import Foundation
 
-/// Nerdpass's three looks. Each has its own colors, panel, volume control, menu bar icon and animations.
+/// Nerdpass's four looks, in the picker's order. Each has its own colors, panel, volume control, menu bar icon and
+/// animations.
 public enum Look: String, CaseIterable, Equatable {
-    /// A backlit analog VU meter on a walnut hi-fi faceplate (the default).
+    /// From the app icon: a glowing cyan-to-blue wave on deep navy (the default).
+    case burst
+    /// A backlit analog VU meter on a walnut hi-fi faceplate.
     case needle
     /// An oscilloscope: a green phosphor trace on a dark CRT.
     case phosphor
@@ -14,7 +17,7 @@ public enum Look: String, CaseIterable, Equatable {
 public func flowButtonLabel(look: Look, on: Bool) -> String {
     switch look {
     case .tally: return on ? "cut()" : "take()"
-    case .needle, .phosphor: return on ? "stop()" : "start()"
+    case .needle, .phosphor, .burst: return on ? "stop()" : "start()"
     }
 }
 

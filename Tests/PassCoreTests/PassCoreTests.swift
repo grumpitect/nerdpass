@@ -207,7 +207,7 @@ final class MenuTests: XCTestCase {
             .header("// output"),
             .output(name: nil, symbol: "speaker.wave.2", checked: true),
             .separator,
-            .look(.needle),
+            .look(.burst),
             .feedback,
             .alwaysOn(on: true),
             .openAtLogin(on: true),
@@ -394,9 +394,9 @@ final class OutputTests: XCTestCase {
 }
 
 final class LookTests: XCTestCase {
-    func testNeedleByDefaultAndRemembered() {
+    func testBurstByDefaultAndRemembered() {
         let settings = PassSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!)
-        XCTAssertEqual(settings.look, .needle)
+        XCTAssertEqual(settings.look, .burst)
         let pass = Passthrough(backend: FakeBackend(), settings: settings)
         var changes = 0
         pass.onChange = { changes += 1 }
@@ -414,6 +414,8 @@ final class LookTests: XCTestCase {
         XCTAssertEqual(flowButtonLabel(look: .phosphor, on: true), "stop()")
         XCTAssertEqual(flowButtonLabel(look: .tally, on: false), "take()")
         XCTAssertEqual(flowButtonLabel(look: .tally, on: true), "cut()")
+        XCTAssertEqual(flowButtonLabel(look: .burst, on: false), "start()")
+        XCTAssertEqual(Look.allCases, [.burst, .needle, .phosphor, .tally], "the picker's order, the default first")
     }
 
     func testClock() {

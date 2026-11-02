@@ -13,9 +13,10 @@ Made for the [Nerdative](https://www.youtube.com/@nerdative) channel on YouTube.
 on your stream means a lot.
 
 <p align="center">
-  <img src="docs/look-needle.png" width="270" alt="Nerdpass in the needle look">
-  <img src="docs/look-phosphor.png" width="270" alt="Nerdpass in the phosphor look">
-  <img src="docs/look-tally.png" width="270" alt="Nerdpass in the tally look">
+  <img src="docs/look-burst.png" width="205" alt="Nerdpass in the burst look">
+  <img src="docs/look-needle.png" width="205" alt="Nerdpass in the needle look">
+  <img src="docs/look-phosphor.png" width="205" alt="Nerdpass in the phosphor look">
+  <img src="docs/look-tally.png" width="205" alt="Nerdpass in the tally look">
 </p>
 
 ## Features
@@ -23,8 +24,11 @@ on your stream means a lot.
 - **Menu bar only.** No Dock icon, no window. The menu bar icon follows the card's sound while it plays, shows when
   Nerdpass is waiting for the card, and rests (tinted like any other menu bar icon) when stopped. Click it for the
   panel.
-- **Three looks.** Pick one under `look` in the panel:
-  - **needle** (the default): a backlit analog VU meter on a walnut faceplate. The menu bar icon is a tiny meter
+- **Four looks.** Pick one under `look` in the panel:
+  - **burst** (the default): from the app icon: deep navy with a wave glowing from cyan into blue, a pill-shaped
+    start/stop and a glowing volume knob. The menu bar icon is the wave itself, still when stopped and moving with the
+    sound while it plays; waiting, it breathes in violet.
+  - **needle**: a backlit analog VU meter on a walnut faceplate. The menu bar icon is a tiny meter
     whose needle swings with the sound, and the panel draws the cable from your card to your speakers with a live
     waveform travelling along it. Starting warms the meter up with a flicker and kicks the needle to +3.
   - **phosphor**: an oscilloscope, green trace on a dark CRT. The menu bar icon is a scope screen with a live trace;
