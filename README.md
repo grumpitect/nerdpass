@@ -138,8 +138,10 @@ swift build
 - `Sources/App`: the AppKit + SwiftUI menu bar app and the audio path: an `AVCaptureSession` delivers the card's
   sound as 48 kHz stereo floats to a short buffer (about 20 ms) that absorbs the difference between the card's
   clock and the output's, and an `AVAudioEngine` plays it through the gain and soft clipper to the picked output.
-- `Tools/make_icon.py`: regenerates the VU meter icon (`pip install pillow numpy`, then `python3 Tools/make_icon.py Resources`;
-  `python3 Tools/make_icon.py --png docs/nerdpass-icon.png 2048` renders the large README version).
+- `Resources/Icons`: the app icon candidates: `wave-burst` (the current app icon), `needle` (the VU meter) and
+  `wave-line`. `python3 Tools/set_icon.py <name>` makes one of them the app icon (it writes `Resources/AppIcon.icns`,
+  `Resources/AppIcon-1024.png` and the README's `docs/nerdpass-icon.png`; needs `pip install pillow`).
+- `Tools/make_icon.py`: regenerates `Resources/Icons/needle.png` (`pip install pillow numpy`).
 
 ## Feedback
 

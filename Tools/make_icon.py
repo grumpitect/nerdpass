@@ -1,15 +1,15 @@
-"""Generates Nerdpass's app icon: a backlit analog VU meter on a walnut faceplate, with an HDMI port as its maker's badge.
+"""Generates the needle icon: a backlit analog VU meter on a walnut faceplate, with an HDMI port as its maker's badge.
+It is one of the icons in Resources/Icons; Tools/set_icon.py makes one of them the app icon.
 
-Usage:  python3 Tools/make_icon.py Resources                        writes AppIcon.icns and AppIcon-1024.png
-        python3 Tools/make_icon.py --png docs/nerdpass-icon.png 2048   one PNG at any size (the README uses 2048)
-Needs:  pip install pillow numpy   (macOS: uses the Futura font and iconutil)
+Usage:  python3 Tools/make_icon.py                                   writes Resources/Icons/needle.png (1024 px)
+        python3 Tools/make_icon.py --png out.png 2048                one PNG at any size
+Needs:  pip install pillow numpy   (macOS: uses the Futura font)
 """
-import sys,os,math,subprocess
+import sys,math
 import numpy as np
 from PIL import Image,ImageDraw,ImageFilter,ImageFont
-PNG=sys.argv[2] if len(sys.argv)>2 and sys.argv[1]=="--png" else None
-R=None if PNG else (sys.argv[1] if len(sys.argv)>1 else "Resources")
-N=int(sys.argv[3]) if PNG and len(sys.argv)>3 else 1024; SS=2; M=N*SS
+PNG=sys.argv[2] if len(sys.argv)>2 and sys.argv[1]=="--png" else "Resources/Icons/needle.png"
+N=int(sys.argv[3]) if len(sys.argv)>3 else 1024; SS=2; M=N*SS
 K=M/1024          # sizes below are in 1024 px units
 I=lambda v:int(round(v*K))
 INK=(26,18,8,255); RED=(232,69,44,255)
@@ -70,10 +70,4 @@ canvas=Image.new("RGBA",(N,N),(0,0,0,0)); canvas.paste(img.resize((N-2*pad,N-2*p
 out=Image.new("RGBA",(N,N),(0,0,0,0)); out.paste(canvas,(0,0),m2)
 shadow=Image.new("RGBA",(N,N),(0,0,0,0)); ImageDraw.Draw(shadow).rounded_rectangle([pad,pad+round(14*N/1024),N-pad,N-pad+round(14*N/1024)],radius=rr,fill=(0,0,0,110))
 final=Image.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(16*N/1024)),out)
-if PNG: final.save(PNG); print("png ok"); sys.exit(0)
-import tempfile
-iconset=os.path.join(tempfile.mkdtemp(),"AppIcon.iconset"); os.makedirs(iconset)
-for s in (16,32,64,128,256,512):
-    final.resize((s,s),Image.LANCZOS).save(f"{iconset}/icon_{s}x{s}.png"); final.resize((s*2,s*2),Image.LANCZOS).save(f"{iconset}/icon_{s}x{s}@2x.png")
-subprocess.run(["iconutil","-c","icns",iconset,"-o",os.path.join(R,"AppIcon.icns")],check=True)
-final.save(os.path.join(R,"AppIcon-1024.png")); print("icon ok")
+final.save(PNG); print("png ok")
