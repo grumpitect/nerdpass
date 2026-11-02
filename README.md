@@ -34,8 +34,10 @@ on your stream means a lot.
     clock of how long the card has been on air; cut() switches off in one frame. The menu bar icon is a tally lamp:
     solid red on air, blinking amber on standby. The fader is labelled in dB.
 - **Start and stop** with one button (or Space while the panel is open).
-- **Volume** from 0 to 100%, 80% by default (100% is the card's own level). The scale follows VLC's cubic curve,
-  so 50% sounds about half as loud. The meter shows the card's level before the volume.
+- **Volume** from 0 to 200%, 100% by default (the card's own level, at the middle of the control). Below 100% the
+  scale follows VLC's cubic curve, so 50% sounds about half as loud. Above 100% Nerdpass boosts the sound, up to 2x
+  (+6 dB) at 200%, through a soft clipper (the same one Nerdfader uses) so loud moments are rounded off instead of
+  crackling. Each look draws the boost in its own hot color. The meter shows the card's level before the volume.
 - **Finds your capture card.** With nothing picked, Nerdpass uses the first input that looks like a capture card.
   Every audio input is listed, so you can pick another one.
 - **Pick where the sound goes.** Under `// output` the panel lists every output (speakers, headphones, displays,
@@ -115,22 +117,27 @@ certificate fixes that:
 ~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --snapshot panel.png           # render the panel to an image
 ~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --snapshot panel.png --demo --look tally   # made-up inputs, any look
 ~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --snapshot-icons icons.png     # every menu bar icon state
+~/Applications/Nerdpass.app/Contents/MacOS/Nerdpass --audio-check 8 --volume 200  # play 8 s and print the audio path's health
 ```
+
+`--audio-check` plays the picked input to the picked output and prints, every second, the frames received and
+played, the buffer's delay, dropouts and the level. Quit the menu bar Nerdpass first.
 
 ## Development
 
 ```bash
-swift test      # 40 tests: capture card detection, picking the input and output, start/stop, unplug and replug,
-                # always on at launch, volume curve, settings, menu layout, meter scale and needle ballistics,
-                # looks (labels, on-air clock, dB scale)
+swift test      # 44 tests: capture card detection, picking the input and output, start/stop, unplug and replug,
+                # always on at launch, volume curve and boost, soft clipper, the output buffer, settings,
+                # menu layout, meter scale and needle ballistics, looks (labels, on-air clock, dB scale)
 swift build
 ```
 
-- `Sources/PassCore`: everything testable (choosing the input, the passthrough state, settings, menu model, and
-  the meter: level to VU scale, needle spring, warm-up and fade).
-- `Sources/App`: the AppKit + SwiftUI menu bar app and the AVFoundation audio (an `AVCaptureSession` with an
-  `AVCaptureAudioPreviewOutput`, the same thing QuickTime's preview uses, plus an `AVCaptureAudioDataOutput` that
-  only measures the level for the meter).
+- `Sources/PassCore`: everything testable (choosing the input, the passthrough state, settings, menu model, the
+  volume curve and soft clipper, the output buffer, and the meter: level to VU scale, needle spring, warm-up and
+  fade).
+- `Sources/App`: the AppKit + SwiftUI menu bar app and the audio path: an `AVCaptureSession` delivers the card's
+  sound as 48 kHz stereo floats to a short buffer (about 20 ms) that absorbs the difference between the card's
+  clock and the output's, and an `AVAudioEngine` plays it through the gain and soft clipper to the picked output.
 - `Tools/make_icon.py`: regenerates the VU meter icon (`pip install pillow numpy`, then `python3 Tools/make_icon.py Resources`;
   `python3 Tools/make_icon.py --png docs/nerdpass-icon.png 2048` renders the large README version).
 

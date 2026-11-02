@@ -2,14 +2,16 @@ import Foundation
 
 /// What Nerdpass remembers between launches (in its UserDefaults).
 public final class PassSettings {
-    public static let defaultPercent = 80
+    public static let defaultPercent = 100
+    /// Up to 200%: past 100% Nerdpass boosts the card's sound (2x at 200%).
+    public static let maxPercent = 200
     private let defaults: UserDefaults
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
-    /// The volume slider, 0 to 100 (80 by default; 100 is the capture card's own level).
+    /// The volume slider, 0 to 200 (100 by default: the capture card's own level; above it is a boost).
     public var volumePercent: Int {
         get { defaults.object(forKey: "volumePercent") == nil ? Self.defaultPercent : defaults.integer(forKey: "volumePercent") }
-        set { defaults.set(min(100, max(0, newValue)), forKey: "volumePercent") }
+        set { defaults.set(min(Self.maxPercent, max(0, newValue)), forKey: "volumePercent") }
     }
     /// The input the user picked (ID and name, so it is found again after moving to another port).
     public var inputID: String? {
@@ -47,9 +49,19 @@ public final class PassSettings {
     }
 }
 
-/// The slider follows VLC's cubic volume curve (like Nerdwave), so 50% sounds about half as loud.
-/// 100% passes the capture card's sound through unchanged.
+/// The volume slider to a gain. Up to 100% it follows VLC's cubic curve (like Nerdwave), so 50% sounds about half as
+/// loud and 100% passes the card's sound through unchanged. Above 100% the percent is the multiplier, like Nerdfader
+/// and other boosters: 200% is 2x (+6 dB).
 public func amplitude(percent: Int) -> Float {
-    let p = Double(min(100, max(0, percent))) / 100
-    return Float(pow(p, 3))
+    let p = Double(min(PassSettings.maxPercent, max(0, percent)))
+    return Float(p <= 100 ? pow(p / 100, 3) : p / 100)
+}
+
+/// Nerdfader's soft clipper: unchanged below 60% of full scale, then peaks are rounded off below a 97% ceiling, so
+/// a boost never clips harshly.
+public func softClip(_ x: Float) -> Float {
+    let knee: Float = 0.6, ceiling: Float = 0.97, a = abs(x)
+    guard a > knee else { return x }
+    let rounded = knee + (ceiling - knee) * tanh((a - knee) / (ceiling - knee))
+    return x < 0 ? -rounded : rounded
 }

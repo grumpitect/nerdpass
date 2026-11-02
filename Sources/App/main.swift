@@ -58,11 +58,17 @@ struct PassError: LocalizedError {
     let errorDescription: String?
 }
 
-/// Measures the sound level of each audio buffer (for the meter), on the capture queue.
-final class LevelTap: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+/// Receives the card's sound from the capture session (as 48 kHz stereo floats), passes it to the output buffer,
+/// and measures its level for the meter. Runs on the capture queue.
+final class CaptureTap: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    let ring: SampleRing
     private let lock = NSLock()
     private var latest: Float = -120
     private var peak: Float?
+    /// Frames received (for `--audio-check`).
+    private(set) var framesIn = 0
+
+    init(ring: SampleRing) { self.ring = ring }
 
     /// The loudest buffer's RMS level in dBFS since the last call, so a short hit between two frames still
     /// shows. With no new buffer since then, the last level again.
@@ -74,91 +80,133 @@ final class LevelTap: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
 
     func reset() {
         lock.lock(); latest = -120; peak = nil; lock.unlock()
-    }
-
-    private func record(_ db: Float) {
-        lock.lock(); peak = max(peak ?? -120, db); lock.unlock()
+        ring.reset()
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let format = sampleBuffer.formatDescription?.audioStreamBasicDescription else { return }
-        let isFloat = format.mFormatFlags & kAudioFormatFlagIsFloat != 0, bits = format.mBitsPerChannel
         var loudest: Float = -120
         try? sampleBuffer.withAudioBufferList { list, _ in
-            for buffer in list {
-                guard let data = buffer.mData else { continue }
-                if isFloat, bits == 32 {
-                    let samples = UnsafeBufferPointer(start: data.assumingMemoryBound(to: Float.self), count: Int(buffer.mDataByteSize) / 4)
-                    loudest = max(loudest, rmsDecibels(samples))
-                } else if bits == 16 || bits == 32 {
-                    // Integer samples (what most USB capture cards send): scale to -1...1 first.
-                    let count = Int(buffer.mDataByteSize) / Int(bits / 8)
-                    var floats = [Float](repeating: 0, count: count)
-                    if bits == 16 {
-                        let ints = data.assumingMemoryBound(to: Int16.self)
-                        for i in 0..<count { floats[i] = Float(ints[i]) / 32768 }
-                    } else {
-                        let ints = data.assumingMemoryBound(to: Int32.self)
-                        for i in 0..<count { floats[i] = Float(ints[i]) / 2_147_483_648 }
-                    }
-                    loudest = max(loudest, floats.withUnsafeBufferPointer(rmsDecibels))
-                }
-            }
+            // The data output converts to interleaved stereo floats (see `CaptureBackend.start`): one buffer.
+            guard let buffer = list.first, let data = buffer.mData, buffer.mNumberChannels == 2 else { return }
+            let samples = data.assumingMemoryBound(to: Float.self), count = Int(buffer.mDataByteSize) / 4
+            ring.write(interleaved: samples, frames: count / 2)
+            loudest = rmsDecibels(UnsafeBufferPointer(start: samples, count: count))
+            framesIn += count / 2
         }
-        record(loudest)
+        lock.lock(); peak = max(peak ?? -120, loudest); lock.unlock()
     }
 }
 
-/// Plays an input live through the Mac's default output, like QuickTime's preview (the same way `sw` did),
-/// and measures its level for the meter.
+/// The volume the output applies, set from the main thread and read on the audio thread.
+final class GainControl: @unchecked Sendable {
+    var target: Float = 1
+}
+
+/// The Core Audio device ID for a device UID, or nil.
+func audioDeviceID(forUID uid: String) -> AudioDeviceID? {
+    var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+                                             mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var cfUID = uid as CFString, id = AudioDeviceID(0), size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    let status = withUnsafePointer(to: &cfUID) {
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
+                                   UInt32(MemoryLayout<CFString>.size), $0, &size, &id)
+    }
+    return status == noErr && id != 0 ? id : nil
+}
+
+/// Plays an input live through one of the Mac's outputs and measures its level for the meter. The card's sound goes
+/// capture session -> a short buffer -> gain -> Nerdfader's soft clipper -> the output, so the volume can go past
+/// 100% (up to 2x at 200%) without clipping harshly.
 final class CaptureBackend: PassBackend {
+    static let sampleRate = 48_000.0
+    let ring = SampleRing(sampleRate: CaptureBackend.sampleRate)
+    lazy var levels = CaptureTap(ring: ring)
+    let gain = GainControl()
     private var session: AVCaptureSession?
-    let levels = LevelTap()
-    private let levelQueue = DispatchQueue(label: "nerdpass.level")
-    private var preview: AVCaptureAudioPreviewOutput?
-    private var errorObserver: NSObjectProtocol?
+    private var engine: AVAudioEngine?
+    private var observers: [NSObjectProtocol] = []
+    private let tapQueue = DispatchQueue(label: "nerdpass.capture", qos: .userInteractive)
     /// startRunning and stopRunning block, so they run off the main thread, in order.
     private let queue = DispatchQueue(label: "nerdpass.session")
-    /// Called on the main thread when a running session fails (for example the card is in use elsewhere).
+    /// Called on the main thread when the sound stops for a reason outside Nerdpass (the card in use elsewhere).
     var onError: ((String) -> Void)?
+    /// Frames the output has played (for `--audio-check`).
+    private(set) var framesOut = 0
 
     func start(inputID: String, outputID: String?, amplitude: Float) throws {
         stop()
         guard let device = AVCaptureDevice(uniqueID: inputID) else { throw PassError(errorDescription: "not connected") }
+        gain.target = amplitude
+
+        let engine = AVAudioEngine()
+        if let outputID, var id = audioDeviceID(forUID: outputID), let unit = engine.outputNode.audioUnit {
+            AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                 &id, UInt32(MemoryLayout<AudioDeviceID>.size))
+        }
+        let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 2)!
+        let ring = ring, gain = gain
+        var current = amplitude
+        let source = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, list -> OSStatus in
+            let buffers = UnsafeMutableAudioBufferListPointer(list)
+            guard buffers.count >= 2, let l = buffers[0].mData?.assumingMemoryBound(to: Float.self),
+                  let r = buffers[1].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+            let frames = Int(frameCount)
+            ring.read(left: l, right: r, frames: frames)
+            // Glide to the set volume over about 20 ms, so moving the slider never clicks.
+            let target = gain.target
+            for i in 0..<frames {
+                current += (target - current) * 0.001
+                l[i] = softClip(l[i] * current)
+                r[i] = softClip(r[i] * current)
+            }
+            self?.framesOut += frames
+            return noErr
+        }
+        engine.attach(source)
+        engine.connect(source, to: engine.mainMixerNode, format: format)
+        engine.prepare()
+        try engine.start()
+
         let session = AVCaptureSession()
         let input = try AVCaptureDeviceInput(device: device)
-        let preview = AVCaptureAudioPreviewOutput()
-        preview.volume = amplitude
-        preview.outputDeviceUniqueID = outputID          // nil: the Mac's default output
-        guard session.canAddInput(input), session.canAddOutput(preview) else {
+        let output = AVCaptureAudioDataOutput()
+        output.audioSettings = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: Self.sampleRate,
+                                AVNumberOfChannelsKey: 2, AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true,
+                                AVLinearPCMIsNonInterleaved: false, AVLinearPCMIsBigEndianKey: false]
+        output.setSampleBufferDelegate(levels, queue: tapQueue)
+        guard session.canAddInput(input), session.canAddOutput(output) else {
+            engine.stop()
             throw PassError(errorDescription: "can't route its sound")
         }
         session.addInput(input)
-        session.addOutput(preview)
-        // A second output only for the meter; it doesn't change what you hear.
-        let meter = AVCaptureAudioDataOutput()
-        meter.setSampleBufferDelegate(levels, queue: levelQueue)
-        if session.canAddOutput(meter) { session.addOutput(meter) }
-        errorObserver = NotificationCenter.default.addObserver(forName: AVCaptureSession.runtimeErrorNotification,
-                                                               object: session, queue: .main) { [weak self] note in
+        session.addOutput(output)
+        observers.append(NotificationCenter.default.addObserver(forName: AVCaptureSession.runtimeErrorNotification,
+                                                                object: session, queue: .main) { [weak self] note in
             let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
             self?.onError?("audio stopped: \(error?.localizedDescription ?? "unknown error")")
-        }
+        })
+        // The output's format changed (sample rate, device): Core Audio stops the engine; start it again.
+        observers.append(NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
+                                                                object: engine, queue: .main) { [weak engine] _ in
+            guard let engine, !engine.isRunning else { return }
+            try? engine.start()
+        })
+        self.engine = engine
         self.session = session
-        self.preview = preview
         queue.async { session.startRunning() }
     }
 
     func stop() {
-        if let o = errorObserver { NotificationCenter.default.removeObserver(o) }
-        errorObserver = nil
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
         if let s = session { queue.async { s.stopRunning() } }
         session = nil
-        preview = nil
+        engine?.stop()
+        engine = nil
         levels.reset()
     }
 
-    func setAmplitude(_ amplitude: Float) { preview?.volume = amplitude }
+    func setAmplitude(_ amplitude: Float) { gain.target = amplitude }
 }
 
 /// Makes no sound: for `--snapshot --demo`.
@@ -319,6 +367,8 @@ struct Palette {
     /// Menu bar ink that isn't tinted by macOS, on a dark and a light menu bar.
     let inkDarkBarNS: NSColor, inkLightBarNS: NSColor
     let font = Font.system(size: 13, design: .monospaced)
+    /// The volume percent's color while boosting past 100%.
+    var boost: Color { look == .tally ? waiting : accent2 }
 
     static let needle = Palette(
         look: .needle, bg: Color(hex: 0x16120C), surface: Color(hex: 0x221B12), text: Color(hex: 0xF4E9D4),
@@ -473,9 +523,10 @@ struct Separator: View {
     }
 }
 
-/// The volume control, drawn per look; click or drag anywhere on it.
-/// Needle: a meter scale with a red pointer. Phosphor: a scope axis with a glowing set line and a lime cursor.
-/// Tally: a broadcast fader labelled in dB.
+/// The volume control, drawn per look; click or drag anywhere on it. It runs 0 to 200%: the left half is 0 to 100%
+/// (the card's own level at the middle) and the right half is the boost, up to 2x, drawn in each look's hot color.
+/// Needle: a meter scale with a red pointer and the boost as its red zone. Phosphor: a scope axis whose glowing set
+/// line turns lime past 1x. Tally: a broadcast fader labelled in dB, amber then red above 0 dB.
 struct VolumeScale: View {
     let percent: Int
     let onChange: (Int) -> Void
@@ -494,19 +545,25 @@ struct VolumeScale: View {
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0).onChanged { g in
                 let x = min(max(0, g.location.x), geo.size.width)
-                onChange(Int((x / max(1, geo.size.width) * 100).rounded()))
+                var percent = Int((x / max(1, geo.size.width) * CGFloat(PassSettings.maxPercent)).rounded())
+                if abs(percent - 100) <= 2 { percent = 100 }          // the card's own level is easy to land on
+                onChange(percent)
             })
         }
         .frame(maxWidth: .infinity)
         .frame(height: 24)
         .onHover { hover = $0 }
-        .help("Click or drag to set the volume")
+        .help("Click or drag to set the volume: 100% is the card's own level, up to 200% boosts it")
     }
 
-    private var v: CGFloat { CGFloat(percent) / 100 }
+    /// Where a percent sits along the control (0 to 1; 100% is the middle).
+    private func at(_ percent: Double) -> CGFloat { CGFloat(percent / Double(PassSettings.maxPercent)) }
+    private var v: CGFloat { at(Double(percent)) }
+    private let unity: CGFloat = 0.5
 
     private func hline(_ ctx: GraphicsContext, _ from: CGFloat, _ to: CGFloat, _ y: CGFloat, _ color: Color, _ width: CGFloat,
                        cap: CGLineCap = .butt) {
+        guard to > from else { return }
         var l = Path(); l.move(to: CGPoint(x: from, y: y)); l.addLine(to: CGPoint(x: to, y: y))
         ctx.stroke(l, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: cap))
     }
@@ -514,51 +571,62 @@ struct VolumeScale: View {
     private func drawNeedle(_ ctx: GraphicsContext, _ size: CGSize) {
         let w = size.width, y: CGFloat = 9
         hline(ctx, 0, w, y, hover ? p.dim : p.bezel, 1)
-        ctx.fill(Path(CGRect(x: w * 0.9, y: y - 1.5, width: w * 0.1, height: 3)), with: .color(p.accent2.opacity(0.35)))
-        if v > 0 { hline(ctx, 1.5, max(1.5, v * w - 3), y, p.text, 3, cap: .round) }
+        ctx.fill(Path(CGRect(x: w * unity, y: y - 1.5, width: w * (1 - unity), height: 3)), with: .color(p.accent2.opacity(0.25)))
+        ctx.fill(Path(CGRect(x: w * unity - 0.5, y: y - 4, width: 1, height: 8)), with: .color(p.dim))
+        hline(ctx, 1.5, min(v, unity) * w - (v <= unity ? 3 : 0), y, p.text, 3, cap: .round)
+        if v > unity { hline(ctx, unity * w, v * w - 3, y, p.accent2, 3, cap: .round) }
         let px = min(w - 4, max(4, v * w))
         var pointer = Path()
         pointer.move(to: CGPoint(x: px, y: y - 2)); pointer.addLine(to: CGPoint(x: px - 4, y: 0)); pointer.addLine(to: CGPoint(x: px + 4, y: 0))
         pointer.closeSubpath()
         ctx.fill(pointer, with: .color(p.accent2))
-        for n in [0, 25, 50, 75, 100] {
-            let x = min(w - 7, max(5, CGFloat(n) / 100 * w))
-            ctx.draw(Text("\(n)").font(.custom("Futura-CondensedMedium", size: 9)).foregroundColor(p.dim), at: CGPoint(x: x, y: y + 10))
+        for n in [0, 50, 100, 150, 200] {
+            let x = min(w - 8, max(5, at(Double(n)) * w))
+            ctx.draw(Text("\(n)").font(.custom("Futura-CondensedMedium", size: 9)).foregroundColor(n > 100 ? p.accent2 : p.dim),
+                     at: CGPoint(x: x, y: y + 10))
         }
     }
 
     private func drawPhosphor(_ ctx: GraphicsContext, _ size: CGSize) {
         let w = size.width, y: CGFloat = 14
-        hline(ctx, 0, w, y + 0.5, p.dim.opacity(hover ? 1 : 0.6), 1)
-        for i in 0...10 {
-            let x = (CGFloat(i) / 10 * (w - 1)).rounded() + 0.5, tall = i % 5 == 0
-            var t = Path(); t.move(to: CGPoint(x: x, y: y + 0.5)); t.addLine(to: CGPoint(x: x, y: y + (tall ? 6 : 3.5)))
-            ctx.stroke(t, with: .color(p.dim.opacity(hover ? 1 : 0.6)), lineWidth: 1)
+        let axis = p.dim.opacity(hover ? 1 : 0.6)
+        hline(ctx, 0, w, y + 0.5, axis, 1)
+        for i in 0...20 {
+            let x = (CGFloat(i) / 20 * (w - 1)).rounded() + 0.5, tall = i % 10 == 0, mid = i % 5 == 0
+            var t = Path(); t.move(to: CGPoint(x: x, y: y + 0.5)); t.addLine(to: CGPoint(x: x, y: y + (tall ? 7 : mid ? 4.5 : 2.5)))
+            ctx.stroke(t, with: .color(i > 10 ? p.accent2.opacity(hover ? 0.9 : 0.5) : axis), lineWidth: 1)
         }
-        if v > 0 {
+        func glow(_ from: CGFloat, _ to: CGFloat, _ color: Color, _ width: CGFloat) {
+            guard to > from else { return }
             ctx.drawLayer { l in
                 l.addFilter(.blur(radius: 2.5))
-                var s = Path(); s.move(to: CGPoint(x: 0, y: y)); s.addLine(to: CGPoint(x: v * w, y: y))
-                l.stroke(s, with: .color(p.accent), lineWidth: 3)
+                var g = Path(); g.move(to: CGPoint(x: from, y: y)); g.addLine(to: CGPoint(x: to, y: y))
+                l.stroke(g, with: .color(color), lineWidth: width + 1)
             }
-            hline(ctx, 0, v * w, y, p.accent, 2)
+            hline(ctx, from, to, y, color, width)
         }
+        glow(0, min(v, unity) * w, p.accent, 2)
+        if v > unity { glow(unity * w, v * w, p.accent2, 2.5) }        // the boost burns hotter
         let cx = min(w - 1, max(0.5, v * w))
         ctx.fill(Path(CGRect(x: cx - 0.6, y: y - 10, width: 1.2, height: 12)), with: .color(p.accent2))
         ctx.draw(Text("▾").font(.system(size: 8)).foregroundColor(p.accent2), at: CGPoint(x: min(w - 4, max(4, cx)), y: 2))
+        ctx.draw(Text("1x").font(.system(size: 7, design: .monospaced)).foregroundColor(p.dim), at: CGPoint(x: unity * w + 7, y: y + 6))
     }
 
     private func drawTally(_ ctx: GraphicsContext, _ size: CGSize) {
         let w = size.width, y: CGFloat = 8
         ctx.fill(Path(roundedRect: CGRect(x: 0, y: y - 2, width: w, height: 4), cornerRadius: 2), with: .color(p.line))
-        for (from, to, color) in [(0.0, 0.8, p.text), (0.8, 0.95, p.waiting), (0.95, 1.0, p.accent)] where Double(v) > from {
-            ctx.fill(Path(CGRect(x: from * w, y: y - 2, width: (min(Double(v), to) - from) * w, height: 4)), with: .color(color))
+        // Cream up to the card's own level (0 dB), amber to +3 dB, red to +6 dB.
+        let plus3 = at(volumePercent(forDecibels: 3))
+        for (from, to, color) in [(0, unity, p.text), (unity, plus3, p.waiting), (plus3, 1, p.accent)] where v > from {
+            ctx.fill(Path(CGRect(x: from * w, y: y - 2, width: (min(v, to) - from) * w, height: 4)), with: .color(color))
         }
+        ctx.fill(Path(CGRect(x: unity * w - 0.5, y: y - 4, width: 1, height: 8)), with: .color(p.dim))
         ctx.fill(Path(CGRect(x: min(w - 2, max(0, v * w - 1)), y: y - 6, width: 2, height: 12)), with: .color(p.text))
-        // Labelled in dB on the same cubic curve the volume uses (100% is 0 dB).
-        for (label, db) in [("-∞", -200.0), ("-24", -24), ("-12", -12), ("-6", -6), ("0", 0)] {
-            let x = min(w - 6, max(6, CGFloat(volumePercent(forDecibels: db)) / 100 * w))
-            ctx.draw(Text(label).font(.system(size: 8, design: .monospaced)).foregroundColor(p.dim), at: CGPoint(x: x, y: y + 12))
+        for (label, db) in [("-∞", -200.0), ("-12", -12), ("-6", -6), ("0", 0), ("+3", 3), ("+6", 6)] {
+            let x = min(w - 6, max(6, at(volumePercent(forDecibels: db)) * w))
+            let color = db > 0 ? (db > 3 ? p.accent : p.waiting) : p.dim
+            ctx.draw(Text(label).font(.system(size: 8, design: .monospaced)).foregroundColor(color), at: CGPoint(x: x, y: y + 12))
         }
     }
 }
@@ -660,11 +728,7 @@ struct Cable: View {
                 if flowing {
                     let wave = travellingWave(width: size.width, mid: y, level: model.meter.needle.position,
                                               time: context.date.timeIntervalSinceReferenceDate)
-                    ctx.drawLayer { l in
-                        l.addFilter(.blur(radius: 2))
-                        l.stroke(wave, with: .color(p.accent.opacity(0.7)), lineWidth: 2.5)
-                    }
-                    ctx.stroke(wave, with: .color(p.accent), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                    drawWave(ctx, wave, color: p.accent)
                 } else if waiting {
                     line(0, size.width, p.waiting, dash: [4, 3])
                 } else {
@@ -676,22 +740,37 @@ struct Cable: View {
     }
 }
 
-/// A wave pinned at both ends that travels left to right and grows with `level` (0 to about 1). Silence is a flat
-/// line; quiet sound is one smooth sine, and as it gets louder a faster second partial fades in, so it looks like
-/// sound rather than a test tone without turning a near-silent ripple into jitter.
-func travellingWave(width: CGFloat, mid y: CGFloat, level: Double, time t: Double, scale: CGFloat = 1) -> Path {
+/// The wave's shape, shared by the panel and the menu bar icon: its height at `u` (0 to 1 along it), from -1 to 1
+/// times `level` (0 to about 1). Pinned at both ends and travelling left to right. Silence is a flat line; quiet
+/// sound is one smooth sine, and as it gets louder a faster second partial fades in, so it looks like sound rather
+/// than a test tone without turning a near-silent ripple into jitter. `ripple: false` leaves the second partial out
+/// (the menu bar icon, where it would crowd 16 pt into squiggles).
+func waveHeight(at u: Double, level: Double, time t: Double, ripple: Bool = true) -> Double {
     let level = min(1, max(0, level))
-    let amp = level * Double(y - 2) * Double(scale)
-    let detail = 0.3 * min(1, level * 2.5)
+    let detail = ripple ? 0.3 * min(1, level * 2.5) : 0
+    let envelope = pow(sin(Double.pi * u), 0.8)
+    let s = (1 - detail) * sin(2 * Double.pi * (u * 3 - t * 1.6)) + detail * sin(2 * Double.pi * (u * 7 - t * 2.9))
+    return envelope * s * level
+}
+
+/// The wave as a path `width` wide around the line at `y`.
+func travellingWave(width: CGFloat, mid y: CGFloat, level: Double, time t: Double, scale: CGFloat = 1) -> Path {
     var wave = Path()
     for i in 0...Int(width * 2) {
-        let x = CGFloat(i) / 2, u = Double(x / width)
-        let envelope = pow(sin(Double.pi * u), 0.8)
-        let s = (1 - detail) * sin(2 * Double.pi * (u * 3 - t * 1.6)) + detail * sin(2 * Double.pi * (u * 7 - t * 2.9))
-        let point = CGPoint(x: x, y: y - CGFloat(envelope * s * amp))
+        let x = CGFloat(i) / 2
+        let point = CGPoint(x: x, y: y - CGFloat(waveHeight(at: Double(x / width), level: level, time: t)) * (y - 2) * scale)
         if i == 0 { wave.move(to: point) } else { wave.addLine(to: point) }
     }
     return wave
+}
+
+/// Draws a wave the same way in every look: a soft glow under a 1.5 pt line with rounded joins, so bends stay smooth.
+func drawWave(_ ctx: GraphicsContext, _ wave: Path, color: Color) {
+    ctx.drawLayer { l in
+        l.addFilter(.blur(radius: 2))
+        l.stroke(wave, with: .color(color.opacity(0.7)), style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+    }
+    ctx.stroke(wave, with: .color(color), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
 }
 
 // MARK: - Phosphor
@@ -708,8 +787,7 @@ struct ScopeTrace: View {
                 switch m.mode {
                 case .flowing:
                     let wave = travellingWave(width: size.width, mid: y, level: m.needle.position, time: t)
-                    ctx.drawLayer { l in l.addFilter(.blur(radius: 2)); l.stroke(wave, with: .color(p.accent.opacity(0.8)), lineWidth: 2.5) }
-                    ctx.stroke(wave, with: .color(p.accent), lineWidth: 1.4)
+                    drawWave(ctx, wave, color: p.accent)
                 case .waiting:
                     var l = Path(); l.move(to: CGPoint(x: 0, y: y)); l.addLine(to: CGPoint(x: size.width, y: y))
                     ctx.stroke(l, with: .color(p.waiting), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
@@ -732,7 +810,7 @@ struct ScopeTrace: View {
         }
         if power > 0.55 {
             let wave = travellingWave(width: size.width, mid: y, level: level, time: time, scale: CGFloat((power - 0.55) / 0.45))
-            ctx.stroke(wave, with: .color(p.accent), lineWidth: 1.4)
+            drawWave(ctx, wave, color: p.accent)
         } else if power > 0.25 {
             let half = size.width / 2 * CGFloat((power - 0.25) / 0.30)
             var l = Path(); l.move(to: CGPoint(x: size.width / 2 - half, y: y)); l.addLine(to: CGPoint(x: size.width / 2 + half, y: y))
@@ -877,7 +955,7 @@ struct NerdView: View {
                 }
             case .phosphor:
                 HStack(spacing: 8) {
-                    ScopeTrace(model: model).frame(width: 44, height: 14)
+                    ScopeTrace(model: model).frame(width: 50, height: 18)
                     Text(status.lowercased()).foregroundColor(statusColor(p)).bold().lineLimit(1).truncationMode(.middle)
                 }
                 .padding(.vertical, 2)
@@ -912,8 +990,9 @@ struct NerdView: View {
             HStack(spacing: 6) {
                 Text("vol").foregroundColor(p.dim)
                 VolumeScale(percent: model.volumePercent) { model.setVolume($0) }
-                Text("\(model.volumePercent)%").foregroundColor(p.text).monospacedDigit()
+                Text("\(model.volumePercent)%").foregroundColor(model.volumePercent > 100 ? p.boost : p.text).monospacedDigit()
                     .frame(width: 38, alignment: .trailing)
+                    .help(model.volumePercent > 100 ? "Boosted: \(String(format: "%.1f", Double(model.volumePercent) / 100))x the card's level" : "")
             }.padding(.vertical, 2)
         case .separator:
             Separator()
@@ -1039,12 +1118,13 @@ enum StatusIcon {
         screen.addClip()
         let trace = NSBezierPath(); trace.lineWidth = 1.6; trace.lineCapStyle = .round; trace.lineJoinStyle = .round
         let t = Date().timeIntervalSinceReferenceDate
+        // The panel's wave without its fast ripple, scaled down to the screen: 16 pt wide, up to 5 pt either way.
         func wave(_ scale: Double) {
-            let amp = min(1, max(0, meter.needle.position)) * 5.5 * scale
-            for i in 0...56 {
-                let x = 3 + CGFloat(i) * 0.285
-                let y = 11 - CGFloat(sin(Double(i) / 56 * Double.pi * 3 + t * 2 * Double.pi) * amp)
-                i == 0 ? trace.move(to: NSPoint(x: x, y: y)) : trace.line(to: NSPoint(x: x, y: y))
+            for i in 0...64 {
+                let u = Double(i) / 64
+                let y = 11 - CGFloat(waveHeight(at: u, level: meter.needle.position, time: t, ripple: false) * 5 * scale)
+                let point = NSPoint(x: 3 + 16 * CGFloat(u), y: y)
+                i == 0 ? trace.move(to: point) : trace.line(to: point)
             }
         }
         switch meter.mode {
@@ -1116,6 +1196,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for input in listInputs() { print(input.looksLikeCaptureCard ? "★" : " ", input.name, " [\(input.id)]") }
             print("outputs:")
             for output in listOutputs() { print("  ", output.name, " [\(output.id)]") }
+            exit(0)
+        }
+        // `--audio-check [seconds] [--volume <percent>]` plays the saved input to the saved output for a few seconds
+        // (8 by default) and prints, each second, the frames received and played, the buffer's delay, dropouts,
+        // catch-ups and the level, then quits. For checking the audio path; quit the menu bar Nerdpass first.
+        if let i = args.firstIndex(of: "--audio-check") {
+            audioCheck(seconds: args.indices.contains(i + 1) ? Double(args[i + 1]) ?? 8 : 8,
+                       volume: args.firstIndex(of: "--volume").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil })
             exit(0)
         }
         // `--snapshot-icons <file.png>` renders the menu bar icon of every look (stopped, flowing, waiting, and the
@@ -1190,6 +1278,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         model.pass.shutdown()
+    }
+
+    private func audioCheck(seconds: Double, volume: Int?) {
+        let backend = CaptureBackend(), settings = PassSettings()
+        let pass = Passthrough(backend: backend, settings: settings)
+        pass.updateInputs(listInputs())
+        pass.updateOutputs(listOutputs())
+        guard let input = pass.selected else { print("no input picked or connected"); return }
+        let percent = volume ?? settings.volumePercent
+        do {
+            try backend.start(inputID: input.id, outputID: pass.selectedOutput?.id, amplitude: amplitude(percent: percent))
+        } catch { print("can't start: \(error.localizedDescription)"); return }
+        print("\(input.name) -> \(pass.selectedOutput?.name ?? "default output") at \(percent)% (gain \(amplitude(percent: percent)))")
+        var lastIn = 0, lastOut = 0
+        for second in 1...Int(seconds) {
+            RunLoop.main.run(until: Date().addingTimeInterval(1))
+            let fill = backend.ring.fill
+            print(String(format: "%2ds  in %5d/s  out %5d/s  delay %3.0f ms  dropouts %d  catch-ups %d  level %6.1f dBFS",
+                         second, backend.levels.framesIn - lastIn, backend.framesOut - lastOut,
+                         Double(fill) / CaptureBackend.sampleRate * 1000, backend.ring.underruns, backend.ring.dropped,
+                         backend.levels.take()))
+            lastIn = backend.levels.framesIn; lastOut = backend.framesOut
+        }
+        backend.stop()
     }
 
     private func snapshotIcons(to url: URL) {

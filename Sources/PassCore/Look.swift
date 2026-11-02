@@ -24,7 +24,8 @@ public func clockString(_ seconds: Int) -> String {
     return String(format: "%02d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
 }
 
-/// The volume slider's percent for a gain in dB, on the cubic curve (100% is 0 dB). Tally labels its fader in dB.
+/// The volume slider's percent for a gain in dB (the inverse of `amplitude(percent:)`: cubic up to 0 dB at 100%,
+/// then linear, so +6 dB is 200%). Tally labels its fader in dB.
 public func volumePercent(forDecibels db: Double) -> Double {
-    pow(10, db / 60) * 100
+    db <= 0 ? pow(10, db / 60) * 100 : pow(10, db / 20) * 100
 }

@@ -52,12 +52,14 @@ final class InputTests: XCTestCase {
 final class SettingsTests: XCTestCase {
     func testDefaultsAndClamping() {
         let s = PassSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!)
-        XCTAssertEqual(s.volumePercent, 80)
+        XCTAssertEqual(s.volumePercent, 100)
         XCTAssertTrue(s.alwaysOn, "always on by default")
         XCTAssertFalse(s.didDefaultLogin)
         XCTAssertNil(s.inputID)
         s.volumePercent = 140
-        XCTAssertEqual(s.volumePercent, 100)
+        XCTAssertEqual(s.volumePercent, 140)
+        s.volumePercent = 260
+        XCTAssertEqual(s.volumePercent, 200)
         s.volumePercent = -5
         XCTAssertEqual(s.volumePercent, 0)
     }
@@ -66,7 +68,9 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(amplitude(percent: 100), 1)
         XCTAssertEqual(amplitude(percent: 0), 0)
         XCTAssertEqual(amplitude(percent: 50), 0.125, accuracy: 0.0001)
-        XCTAssertEqual(amplitude(percent: 250), 1)
+        XCTAssertEqual(amplitude(percent: 150), 1.5, "above 100% the percent is the multiplier")
+        XCTAssertEqual(amplitude(percent: 200), 2)
+        XCTAssertEqual(amplitude(percent: 250), 2, "capped at 200%")
     }
 }
 
@@ -86,7 +90,7 @@ final class PassthroughTests: XCTestCase {
         pass.start()
         XCTAssertEqual(pass.state, .flowing(card))
         XCTAssertEqual(backend.playing, "card-1")
-        XCTAssertEqual(backend.amplitude, amplitude(percent: 80), "80% by default")
+        XCTAssertEqual(backend.amplitude, 1, "100% by default: the card's own level")
         XCTAssertEqual(settings.inputID, "card-1")
     }
 
@@ -421,6 +425,59 @@ final class LookTests: XCTestCase {
     func testDecibelScaleMatchesTheVolumeCurve() {
         XCTAssertEqual(volumePercent(forDecibels: 0), 100, accuracy: 0.001)
         XCTAssertEqual(volumePercent(forDecibels: -6), 79.4, accuracy: 0.1)
+        XCTAssertEqual(volumePercent(forDecibels: 6), 199.5, accuracy: 0.1, "+6 dB is 2x")
+        XCTAssertEqual(Double(amplitude(percent: Int(volumePercent(forDecibels: 3).rounded()))), 1.41, accuracy: 0.01)
         XCTAssertEqual(Double(amplitude(percent: Int(volumePercent(forDecibels: -12).rounded()))), 0.25, accuracy: 0.01)
+    }
+}
+
+final class BoostTests: XCTestCase {
+    func testSoftClip() {
+        XCTAssertEqual(softClip(0.5), 0.5, "untouched below the knee")
+        XCTAssertEqual(softClip(-0.3), -0.3)
+        XCTAssertLessThan(softClip(2), 0.97, "never past the ceiling")
+        XCTAssertGreaterThan(softClip(2), 0.9)
+        XCTAssertEqual(softClip(-2), -softClip(2))
+        XCTAssertLessThan(softClip(0.8), 0.8)
+        XCTAssertGreaterThan(softClip(0.8), softClip(0.7), "still rising")
+    }
+
+    func testRingWaitsForTargetThenPlaysInOrder() {
+        let ring = SampleRing(sampleRate: 1000, target: 0.01, limit: 0.05)      // target 10 frames, limit 50
+        var l = [Float](repeating: 9, count: 4), r = [Float](repeating: 9, count: 4)
+        let frames: [Float] = (0..<8).flatMap { [Float($0), -Float($0)] }
+        ring.write(interleaved: frames, frames: 8)
+        ring.read(left: &l, right: &r, frames: 4)
+        XCTAssertEqual(l, [0, 0, 0, 0], "silence until 10 frames wait")
+        let more: [Float] = (8..<12).flatMap { [Float($0), -Float($0)] }
+        ring.write(interleaved: more, frames: 4)
+        ring.read(left: &l, right: &r, frames: 4)
+        XCTAssertEqual(l, [0, 1, 2, 3])
+        XCTAssertEqual(r, [0, -1, -2, -3])
+    }
+
+    func testRingDropsOldFramesWhenTheCardRunsAhead() {
+        let ring = SampleRing(sampleRate: 1000, target: 0.01, limit: 0.05)
+        let frames: [Float] = (0..<60).flatMap { [Float($0), 0] }
+        ring.write(interleaved: frames, frames: 60)
+        XCTAssertEqual(ring.fill, 10, "back to the target delay")
+        XCTAssertEqual(ring.dropped, 50)
+        var l = [Float](repeating: 0, count: 1), r = l
+        ring.read(left: &l, right: &r, frames: 1)
+        XCTAssertEqual(l, [50], "keeps the newest frames")
+    }
+
+    func testRingRunningDryPlaysSilenceAndRePrimes() {
+        let ring = SampleRing(sampleRate: 1000, target: 0.01, limit: 0.05)
+        let frames: [Float] = (1...10).flatMap { [Float($0), 0] }
+        ring.write(interleaved: frames, frames: 10)
+        var l = [Float](repeating: 0, count: 12), r = l
+        ring.read(left: &l, right: &r, frames: 12)
+        XCTAssertEqual(Array(l[8...]), [9, 10, 0, 0])
+        XCTAssertEqual(ring.underruns, 1)
+        ring.write(interleaved: frames, frames: 5)
+        var l2 = [Float](repeating: 7, count: 2), r2 = l2
+        ring.read(left: &l2, right: &r2, frames: 2)
+        XCTAssertEqual(l2, [0, 0], "waits for the target again")
     }
 }
