@@ -436,7 +436,7 @@ struct FlowButton: View {
         case .tally:
             let fill: Color = on ? (hover ? Color(hex: 0xD92C22) : p.accent) : (hover && enabled ? p.accent2 : .clear)
             Text(title).bold()
-                .frame(width: 150, height: 32)
+                .frame(width: 150, height: 30)
                 .foregroundColor(!enabled ? p.dim.opacity(0.6) : (on ? Color(hex: 0xFFF3E6) : (hover ? p.bg : p.accent2)))
                 .background(RoundedRectangle(cornerRadius: 6).fill(fill))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(!enabled ? p.bezel : (on ? p.accent : p.accent2)))
@@ -829,7 +829,6 @@ struct NerdView: View {
         .font(p.font)
         .foregroundColor(p.text)
         .padding(12)
-        .padding(.top, p.look == .tally ? 3 : 0)
         .frame(width: 330)
         .background(RoundedRectangle(cornerRadius: p.radius).fill(p.bg))
         .overlay(alignment: .top) {
@@ -878,8 +877,11 @@ struct NerdView: View {
                 .padding(.vertical, 2)
                 .overlay { BeamSweep(model: model) }
             case .tally:
-                if model.isFlowing { OnAir(model: model) }
-                Text(status.lowercased()).foregroundColor(statusColor(p)).lineLimit(1).truncationMode(.middle)
+                // One row, like the other looks: LIVE and the clock lead while on air.
+                HStack(spacing: 8) {
+                    if model.isFlowing { OnAir(model: model).fixedSize() }
+                    Text(status.lowercased()).foregroundColor(statusColor(p)).lineLimit(1).truncationMode(.middle)
+                }
             }
             FlowButton(on: on, enabled: enabled) { model.toggle() }
         }
