@@ -200,7 +200,10 @@ final class AppModel: ObservableObject {
         (backend as? CaptureBackend)?.onError = { [weak self] in self?.pass.fail($0) }
     }
 
+    /// Set by `--snapshot --demo --denied` to show the permission row without changing the real permission.
+    var showDenied = false
     var accessDenied: Bool {
+        if showDenied { return true }
         let s = AVCaptureDevice.authorizationStatus(for: .audio)
         return s == .denied || s == .restricted
     }
@@ -673,15 +676,18 @@ struct Cable: View {
     }
 }
 
-/// A wave pinned at both ends that travels left to right and grows with `level` (0 to about 1).
-/// Two partials, so it looks like sound rather than a test tone.
+/// A wave pinned at both ends that travels left to right and grows with `level` (0 to about 1). Silence is a flat
+/// line; quiet sound is one smooth sine, and as it gets louder a faster second partial fades in, so it looks like
+/// sound rather than a test tone without turning a near-silent ripple into jitter.
 func travellingWave(width: CGFloat, mid y: CGFloat, level: Double, time t: Double, scale: CGFloat = 1) -> Path {
-    let amp = (1.2 + min(1, max(0, level)) * Double(y - 2)) * Double(scale)
+    let level = min(1, max(0, level))
+    let amp = level * Double(y - 2) * Double(scale)
+    let detail = 0.3 * min(1, level * 2.5)
     var wave = Path()
-    for i in 0...Int(width) {
-        let x = CGFloat(i), u = Double(x / width)
+    for i in 0...Int(width * 2) {
+        let x = CGFloat(i) / 2, u = Double(x / width)
         let envelope = pow(sin(Double.pi * u), 0.8)
-        let s = 0.7 * sin(2 * Double.pi * (u * 3 - t * 1.6)) + 0.3 * sin(2 * Double.pi * (u * 7 - t * 2.9))
+        let s = (1 - detail) * sin(2 * Double.pi * (u * 3 - t * 1.6)) + detail * sin(2 * Double.pi * (u * 7 - t * 2.9))
         let point = CGPoint(x: x, y: y - CGFloat(envelope * s * amp))
         if i == 0 { wave.move(to: point) } else { wave.addLine(to: point) }
     }
@@ -920,9 +926,9 @@ struct NerdView: View {
                 HStack(spacing: 8) {
                     Text(" ")
                     Image(systemName: "exclamationmark.triangle.fill").frame(width: 16).foregroundColor(p.waiting)
-                    Text("allow_audio_input…").foregroundColor(p.waiting)
-                    Spacer()
-                    Text("settings ↗").foregroundColor(p.dim)
+                    Text("allow_audio_input").foregroundColor(p.waiting).lineLimit(1).layoutPriority(1)
+                    Spacer(minLength: 4)
+                    Text("settings ↗").foregroundColor(p.dim).lineLimit(1).fixedSize()
                 }
             }
             .help("Turn on Nerdpass in System Settings > Privacy & Security > Microphone (capture cards count as one)")
@@ -1031,13 +1037,13 @@ enum StatusIcon {
         bezel.setStroke(); screen.stroke()
         NSGraphicsContext.saveGraphicsState()
         screen.addClip()
-        let trace = NSBezierPath(); trace.lineWidth = 1.6; trace.lineCapStyle = .round
+        let trace = NSBezierPath(); trace.lineWidth = 1.6; trace.lineCapStyle = .round; trace.lineJoinStyle = .round
         let t = Date().timeIntervalSinceReferenceDate
         func wave(_ scale: Double) {
-            let amp = (1 + min(1, meter.needle.position) * 4.5) * scale
-            for i in 0...28 {
-                let x = 3 + CGFloat(i) * 0.57
-                let y = 11 - CGFloat(sin(Double(i) / 28 * Double.pi * 3 + t * 2 * Double.pi) * amp)
+            let amp = min(1, max(0, meter.needle.position)) * 5.5 * scale
+            for i in 0...56 {
+                let x = 3 + CGFloat(i) * 0.285
+                let y = 11 - CGFloat(sin(Double(i) / 56 * Double.pi * 3 + t * 2 * Double.pi) * amp)
                 i == 0 ? trace.move(to: NSPoint(x: x, y: y)) : trace.line(to: NSPoint(x: x, y: y))
             }
         }
@@ -1120,7 +1126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // `--snapshot <file.png>` renders the panel to an image and quits (for checking the UI without clicking).
         // With `--demo` it shows made-up inputs with the sound on, and leaves the settings alone (for the README);
-        // `--look needle|phosphor|tally` picks the look.
+        // `--look needle|phosphor|tally` picks the look, and `--level <dBFS>` the sound level (-22 by default);
+        // `--denied` shows the row for allowing audio input.
         if let i = args.firstIndex(of: "--snapshot"), args.indices.contains(i + 1) {
             let shown: AppModel
             if args.contains("--demo") {
@@ -1136,6 +1143,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 shown.pass.start()
                 shown.refresh()
                 shown.flowStartedAt = Date().addingTimeInterval(-764)
+                shown.showDenied = args.contains("--denied")
+                if let j = args.firstIndex(of: "--level"), args.indices.contains(j + 1), let db = Float(args[j + 1]) {
+                    shown.levelDecibels = { db }
+                    for _ in 0..<60 { shown.stepMeter(1.0 / 30) }
+                }
                 for _ in 0..<60 { shown.stepMeter(1.0 / 30) }
             } else {
                 shown = model

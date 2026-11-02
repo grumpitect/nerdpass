@@ -80,7 +80,7 @@ this once.
 
 **Audio input access.** macOS treats a capture card's sound like a microphone, so the first time the sound starts
 it asks to let Nerdpass use audio input. Nerdpass only plays the sound to your speakers; nothing is
-recorded or sent anywhere. If you said no, the panel shows **allow_audio_input…**, which opens the setting.
+recorded or sent anywhere. If you said no, the panel shows **allow_audio_input**, which opens the setting.
 
 ## Requirements
 
