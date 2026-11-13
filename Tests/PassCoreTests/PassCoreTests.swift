@@ -211,6 +211,7 @@ final class MenuTests: XCTestCase {
             .feedback,
             .alwaysOn(on: true),
             .openAtLogin(on: true),
+            .volumeKeys(on: false),
             .exit,
         ])
     }
@@ -481,5 +482,71 @@ final class BoostTests: XCTestCase {
         var l2 = [Float](repeating: 7, count: 2), r2 = l2
         ring.read(left: &l2, right: &r2, frames: 2)
         XCTAssertEqual(l2, [0, 0], "waits for the target again")
+    }
+}
+
+final class VolumeKeyTests: XCTestCase {
+    /// data1 as macOS packs it: key type << 16 | state << 8 | repeat.
+    private func data1(_ type: Int, down: Bool, repeating: Bool = false) -> Int {
+        type << 16 | (down ? 0xA : 0xB) << 8 | (repeating ? 1 : 0)
+    }
+
+    func testReadsVolumeKeys() {
+        XCTAssertEqual(volumeKeyEvent(data1: data1(0, down: true)), VolumeKeyEvent(key: .up, isDown: true, isRepeat: false))
+        XCTAssertEqual(volumeKeyEvent(data1: data1(1, down: true, repeating: true)), VolumeKeyEvent(key: .down, isDown: true, isRepeat: true))
+        XCTAssertEqual(volumeKeyEvent(data1: data1(7, down: false)), VolumeKeyEvent(key: .mute, isDown: false, isRepeat: false))
+        XCTAssertNil(volumeKeyEvent(data1: data1(16, down: true)), "play/pause is not a volume key")
+        XCTAssertNil(volumeKeyEvent(data1: data1(2, down: true)), "brightness up is not a volume key")
+    }
+
+    func testStepsSnapToTheGridAndStayInRange() {
+        XCTAssertEqual(steppedVolume(100, .up), 105)
+        XCTAssertEqual(steppedVolume(100, .down), 95)
+        XCTAssertEqual(steppedVolume(83, .up), 85)
+        XCTAssertEqual(steppedVolume(83, .down), 80)
+        XCTAssertEqual(steppedVolume(200, .up), 200)
+        XCTAssertEqual(steppedVolume(0, .down), 0)
+        XCTAssertEqual(steppedVolume(3, .down), 0)
+    }
+
+    func testMuteKeepsTheVolumeAndAnyChangeUnmutes() {
+        let backend = FakeBackend()
+        let settings = PassSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let pass = Passthrough(backend: backend, settings: settings)
+        pass.updateInputs([card])
+        pass.start()
+        pass.handle(.mute)
+        XCTAssertTrue(pass.muted)
+        XCTAssertEqual(backend.amplitude, 0)
+        XCTAssertEqual(pass.volumePercent, 100, "the volume is kept")
+        pass.handle(.mute)
+        XCTAssertFalse(pass.muted)
+        XCTAssertEqual(backend.amplitude, 1)
+        pass.handle(.mute)
+        pass.handle(.up)
+        XCTAssertFalse(pass.muted, "a volume change unmutes")
+        XCTAssertEqual(pass.volumePercent, 105)
+        XCTAssertEqual(backend.amplitude, 1.05, accuracy: 0.0001)
+    }
+
+    func testStartingWhileMutedStaysSilent() {
+        let backend = FakeBackend()
+        let pass = Passthrough(backend: backend, settings: PassSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!))
+        pass.updateInputs([card])
+        pass.toggleMute()
+        pass.start()
+        XCTAssertEqual(backend.amplitude, 0)
+    }
+
+    func testVolumeKeysSettingAndMenu() {
+        let settings = PassSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        XCTAssertTrue(settings.volumeKeys, "on by default")
+        let entries = menuEntries(for: MenuState(flow: .stopped, inputs: [card], selectedID: nil, volumePercent: 100,
+                                                 alwaysOn: true, openAtLogin: true, volumeKeys: true, volumeKeysAllowed: false))
+        XCTAssertTrue(entries.contains(.allowVolumeKeys), "asks for access while it is missing")
+        XCTAssertTrue(entries.contains(.volumeKeys(on: true)))
+        let allowed = menuEntries(for: MenuState(flow: .stopped, inputs: [card], selectedID: nil, volumePercent: 100,
+                                                 alwaysOn: true, openAtLogin: true, volumeKeys: true, volumeKeysAllowed: true))
+        XCTAssertFalse(allowed.contains(.allowVolumeKeys))
     }
 }

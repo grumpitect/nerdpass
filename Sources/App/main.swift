@@ -1,5 +1,6 @@
 // Nerdpass: plays a capture card's sound through the Mac, from the menu bar (AppKit + SwiftUI glue around PassCore).
 import AppKit
+import ApplicationServices
 import AVFoundation
 import CoreAudio
 import PassCore
@@ -216,6 +217,73 @@ final class SilentBackend: PassBackend {
     func setAmplitude(_ amplitude: Float) {}
 }
 
+/// Shift + the keyboard's volume keys, taken over for Nerdpass: an event tap on the media key events (macOS sends
+/// volume keys as system-defined events, not key presses). It consumes Shift+Volume Up, Down and Mute so macOS
+/// leaves the system volume alone, and lets everything else through (Shift+Option+volume stays macOS's fine steps).
+/// Needs Accessibility access; without it the tap can't be created and Nerdpass asks for it in the panel.
+final class VolumeKeyTap {
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
+    private var retry: Timer?
+    /// Called on the main thread for each press (and key repeat) of a volume key with Shift held.
+    var onKey: ((VolumeKeyEvent) -> Void)?
+
+    var isActive: Bool { tap != nil }
+    static var isAllowed: Bool { AXIsProcessTrusted() }
+
+    /// Turns the tap on or off. While on but not allowed, it checks every 2 seconds and starts as soon as access is
+    /// granted in System Settings.
+    func setEnabled(_ enabled: Bool) {
+        guard enabled else { stop(); return }
+        if tap == nil, !start() {
+            guard retry == nil else { return }
+            let t = Timer(timeInterval: 2, repeats: true) { [weak self] timer in
+                if self?.start() == true { timer.invalidate(); self?.retry = nil }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            retry = t
+        }
+    }
+
+    private func start() -> Bool {
+        guard Self.isAllowed else { return false }
+        let mask = CGEventMask(1 << 14)                                 // NX_SYSDEFINED: media keys
+        let callback: CGEventTapCallBack = { _, type, event, info in
+            let me = Unmanaged<VolumeKeyTap>.fromOpaque(info!).takeUnretainedValue()
+            return me.handle(type, event)
+        }
+        guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                           eventsOfInterest: mask, callback: callback,
+                                           userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
+        let src = CFMachPortCreateRunLoopSource(nil, port, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+        CGEvent.tapEnable(tap: port, enable: true)
+        tap = port; source = src
+        return true
+    }
+
+    private func stop() {
+        retry?.invalidate(); retry = nil
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        tap = nil; source = nil
+    }
+
+    private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+        // macOS switches a tap off when it is slow or on some user input; switch it back on.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        let flags = event.flags
+        guard flags.contains(.maskShift), flags.isDisjoint(with: [.maskAlternate, .maskCommand, .maskControl]),
+              let ns = NSEvent(cgEvent: event), ns.type == .systemDefined, ns.subtype.rawValue == 8,
+              let key = volumeKeyEvent(data1: ns.data1) else { return Unmanaged.passUnretained(event) }
+        if key.isDown { DispatchQueue.main.async { [weak self] in self?.onKey?(key) } }
+        return nil                                                      // consumed: macOS doesn't change its volume
+    }
+}
+
 /// Shared state for the panel, refreshed whenever the passthrough changes.
 final class AppModel: ObservableObject {
     let pass: Passthrough
@@ -223,7 +291,8 @@ final class AppModel: ObservableObject {
     @Published var volumePercent: Int
     @Published var isFlowing = false
     @Published var isWaiting = false
-    @Published var look: Look = .needle
+    @Published var look: Look = .burst
+    @Published var muted = false
     /// When the sound started flowing (Tally's on-air clock).
     var flowStartedAt: Date?
     var onQuit: (() -> Void)?
@@ -258,6 +327,7 @@ final class AppModel: ObservableObject {
 
     func refresh() {
         volumePercent = pass.volumePercent
+        muted = pass.muted
         look = pass.look
         if case .flowing = pass.state { isFlowing = true } else { isFlowing = false }
         if isFlowing, flowStartedAt == nil { flowStartedAt = Date() } else if !isFlowing { flowStartedAt = nil }
@@ -265,7 +335,8 @@ final class AppModel: ObservableObject {
         entries = menuEntries(for: MenuState(
             flow: pass.state, inputs: pass.inputs, selectedID: pass.selected?.id,
             outputs: pass.outputs, selectedOutputID: pass.selectedOutput?.id, volumePercent: volumePercent, look: look,
-            alwaysOn: pass.alwaysOn, openAtLogin: SMAppService.mainApp.status == .enabled, accessDenied: accessDenied))
+            alwaysOn: pass.alwaysOn, openAtLogin: SMAppService.mainApp.status == .enabled, accessDenied: accessDenied,
+            volumeKeys: pass.volumeKeys, volumeKeysAllowed: VolumeKeyTap.isAllowed))
         onRefresh?()
     }
 
@@ -293,6 +364,13 @@ final class AppModel: ObservableObject {
     }
     func launch() { if pass.alwaysOn { withAccess { [weak self] in self?.pass.launch() } } }
     func toggleAlwaysOn() { pass.setAlwaysOn(!pass.alwaysOn) }
+    func toggleVolumeKeys() { pass.setVolumeKeys(!pass.volumeKeys) }
+
+    /// Asks macOS for Accessibility access (its own prompt, once) and opens the setting.
+    func allowVolumeKeys() {
+        _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
     func setLook(_ look: Look) { pass.setLook(look) }
 
     /// Open at login is on by default: Nerdpass turns it on once, at its first launch, so turning it off sticks.
@@ -681,6 +759,46 @@ struct VolumeScale: View {
             let color = db > 0 ? (db > 3 ? p.accent : p.waiting) : p.dim
             ctx.draw(Text(label).font(.system(size: 8, design: .monospaced)).foregroundColor(color), at: CGPoint(x: x, y: y + 12))
         }
+    }
+}
+
+/// "vol", the look's volume control and the percent ("mute" while muted, the control dimmed). Used in the panel
+/// and, not clickable, in the readout that shows when Shift + a volume key is pressed.
+struct VolumeRow: View {
+    @ObservedObject var model: AppModel
+    var interactive = true
+    @Environment(\.palette) private var p
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: model.muted ? "speaker.slash.fill" : "speaker.wave.2.fill").font(.system(size: 11))
+                .foregroundColor(model.muted ? p.waiting : p.dim).frame(width: 22)
+                .help(model.muted ? "Muted (Shift + Mute to unmute)" : "")
+            VolumeScale(percent: model.volumePercent) { model.setVolume($0) }
+                .opacity(model.muted ? 0.35 : 1)
+                .allowsHitTesting(interactive)
+            Text(model.muted ? "mute" : "\(model.volumePercent)%")
+                .foregroundColor(model.muted ? p.waiting : (model.volumePercent > 100 ? p.boost : p.text)).monospacedDigit()
+                .frame(width: 38, alignment: .trailing)
+                .help(model.volumePercent > 100 ? "Boosted: \(String(format: "%.1f", Double(model.volumePercent) / 100))x the card's level" : "")
+        }
+    }
+}
+
+/// The readout that shows under the menu bar icon for a moment when Shift + a volume key is pressed (the panel
+/// closed): the volume row in the current look.
+struct VolumeReadout: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        let p = Palette.of(model.look)
+        VolumeRow(model: model, interactive: false)
+            .font(p.font)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .frame(width: 280)
+            .background(RoundedRectangle(cornerRadius: p.radius).fill(p.bg))
+            .overlay(RoundedRectangle(cornerRadius: p.radius).strokeBorder(p.bezel, lineWidth: 1))
+            .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+            .padding(EdgeInsets(top: 4, leading: 10, bottom: 14, trailing: 10))
+            .environment(\.palette, p)
     }
 }
 
@@ -1099,13 +1217,7 @@ struct NerdView: View {
         case let .flow(status, on, enabled):
             flow(status, on: on, enabled: enabled, p)
         case .volume:
-            HStack(spacing: 6) {
-                Text("vol").foregroundColor(p.dim)
-                VolumeScale(percent: model.volumePercent) { model.setVolume($0) }
-                Text("\(model.volumePercent)%").foregroundColor(model.volumePercent > 100 ? p.boost : p.text).monospacedDigit()
-                    .frame(width: 38, alignment: .trailing)
-                    .help(model.volumePercent > 100 ? "Boosted: \(String(format: "%.1f", Double(model.volumePercent) / 100))x the card's level" : "")
-            }.padding(.vertical, 2)
+            VolumeRow(model: model).padding(.vertical, 2)
         case .separator:
             Separator()
         case let .header(text):
@@ -1145,6 +1257,20 @@ struct NerdView: View {
                 .help("Start the sound every time Nerdpass opens (with open_at_login: whenever you log in)")
         case let .openAtLogin(on):
             RowButton(action: model.toggleLogin) { item(checked: on, symbol: "laptopcomputer", title: "open_at_login", p) }
+        case let .volumeKeys(on):
+            RowButton(action: model.toggleVolumeKeys) { item(checked: on, symbol: "keyboard", title: "shift+volume_keys", p) }
+                .help("Shift + Volume Up / Down / Mute control Nerdpass instead of the Mac's volume")
+        case .allowVolumeKeys:
+            RowButton(action: { model.allowVolumeKeys() }) {
+                HStack(spacing: 8) {
+                    Text(" ")
+                    Image(systemName: "exclamationmark.triangle.fill").frame(width: 16).foregroundColor(p.waiting)
+                    Text("allow_volume_keys").foregroundColor(p.waiting).lineLimit(1).layoutPriority(1)
+                    Spacer(minLength: 4)
+                    Text("settings ↗").foregroundColor(p.dim).lineLimit(1).fixedSize()
+                }
+            }
+            .help("Turn on Nerdpass in System Settings > Privacy & Security > Accessibility, so Shift + the volume keys reach it")
         case .exit:
             RowButton(action: { model.onQuit?() }) {
                 HStack(spacing: 8) {
@@ -1330,6 +1456,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickMonitor: Any?
     private var keyMonitor: Any?
     private var deviceObservers: [NSObjectProtocol] = []
+    private let volumeKeys = VolumeKeyTap()
+    private var readout: NerdPanel?
+    private var readoutHide: DispatchWorkItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
@@ -1418,6 +1547,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.outputsChanged()
         model.inputsChanged()
         model.defaultLoginOnce()
+        // Shift + the volume keys: step the volume or mute, and show the readout unless the panel is open.
+        volumeKeys.onKey = { [weak self] event in
+            guard let self else { return }
+            if event.key == .mute && event.isRepeat { return }
+            self.model.pass.handle(event.key)
+            if self.panel?.isVisible != true { self.showReadout() }
+        }
         // `--start` turns the sound on right away (for testing or a Stream Deck) even when always on is off.
         if args.contains("--start") { model.start() } else { model.launch() }
         model.refresh()
@@ -1539,6 +1675,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stateChanged() {
         updateStatusIcon()
         resizePanel()
+        volumeKeys.setEnabled(model.pass.volumeKeys)
+    }
+
+    /// Shows the volume readout under the menu bar icon for 1.5 seconds after the last key press.
+    private func showReadout() {
+        let r = readout ?? {
+            let p = NerdPanel(contentRect: NSRect(x: 0, y: 0, width: 300, height: 60),
+                              styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            p.isFloatingPanel = true
+            p.level = .popUpMenu
+            p.backgroundColor = .clear
+            p.isOpaque = false
+            p.hasShadow = false
+            p.ignoresMouseEvents = true
+            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            p.contentView = NSHostingView(rootView: VolumeReadout(model: model))
+            return p
+        }()
+        readout = r
+        if let hosting = r.contentView {
+            let size = hosting.fittingSize
+            let bwin = statusItem.button?.window
+            let screen = bwin?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+            // Under the menu bar icon; at the top center of the screen when the icon is hidden (a full menu bar
+            // pushes icons behind the notch).
+            let iconShown = bwin.map { $0.occlusionState.contains(.visible) && screen.insetBy(dx: -1, dy: -40).contains($0.frame) } ?? false
+            let anchor = iconShown ? bwin!.frame : NSRect(x: screen.midX, y: screen.maxY, width: 0, height: 0)
+            let x = min(max(anchor.midX - size.width / 2, screen.minX + 4), screen.maxX - size.width - 4)
+            r.setFrame(NSRect(x: x, y: anchor.minY - size.height + 6, width: size.width, height: size.height), display: true)
+        }
+        r.alphaValue = 1
+        r.orderFrontRegardless()
+        readoutHide?.cancel()
+        let hide = DispatchWorkItem { [weak r] in
+            NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; r?.animator().alphaValue = 0 }, completionHandler: { r?.orderOut(nil) })
+        }
+        readoutHide = hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: hide)
     }
 
     @objc private func togglePanel() {

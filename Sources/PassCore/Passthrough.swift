@@ -27,6 +27,8 @@ public final class Passthrough {
     public private(set) var state: FlowState = .stopped
     public private(set) var inputs: [AudioInput] = []
     public private(set) var outputs: [AudioOutput] = []
+    /// Muted with Shift+Mute: silent, with the volume kept for unmuting. Any volume change unmutes.
+    public private(set) var muted = false
     /// The output the sound is playing to right now (nil: the default output).
     private var activeOutputID: String?
     /// Called after every change of state, inputs or volume.
@@ -107,9 +109,29 @@ public final class Passthrough {
 
     public func setVolume(_ percent: Int) {
         settings.volumePercent = percent
-        backend.setAmplitude(amplitude(percent: settings.volumePercent))
+        muted = false
+        backend.setAmplitude(currentAmplitude)
         onChange?()
     }
+
+    public func toggleMute() {
+        muted.toggle()
+        backend.setAmplitude(currentAmplitude)
+        onChange?()
+    }
+
+    /// Shift + a volume key: up and down step the volume (unmuting), mute toggles mute.
+    public func handle(_ key: VolumeKey) {
+        if key == .mute { toggleMute() } else { setVolume(steppedVolume(settings.volumePercent, key)) }
+    }
+
+    public var volumeKeys: Bool { settings.volumeKeys }
+    public func setVolumeKeys(_ on: Bool) {
+        settings.volumeKeys = on
+        onChange?()
+    }
+
+    private var currentAmplitude: Float { muted ? 0 : amplitude(percent: settings.volumePercent) }
 
     /// The inputs the Mac sees now. When the playing input disappears Nerdpass waits for it, and when a waited-for
     /// input (or, with nothing picked yet, a capture card) appears it starts.
@@ -143,7 +165,7 @@ public final class Passthrough {
         }
         do {
             let output = selectedOutput?.id
-            try backend.start(inputID: input.id, outputID: output, amplitude: amplitude(percent: settings.volumePercent))
+            try backend.start(inputID: input.id, outputID: output, amplitude: currentAmplitude)
             activeOutputID = output
             settings.inputID = input.id
             settings.inputName = input.name

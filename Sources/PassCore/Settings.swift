@@ -36,6 +36,11 @@ public final class PassSettings {
         get { defaults.string(forKey: "look").flatMap(Look.init(rawValue:)) ?? .burst }
         set { defaults.set(newValue.rawValue, forKey: "look") }
     }
+    /// Shift + the volume keys control Nerdpass's volume (on by default; needs Accessibility access).
+    public var volumeKeys: Bool {
+        get { defaults.object(forKey: "volumeKeys") == nil ? true : defaults.bool(forKey: "volumeKeys") }
+        set { defaults.set(newValue, forKey: "volumeKeys") }
+    }
     /// Always on: Nerdpass starts the sound every time it opens (on by default).
     public var alwaysOn: Bool {
         get { defaults.object(forKey: "alwaysOn") == nil ? true : defaults.bool(forKey: "alwaysOn") }

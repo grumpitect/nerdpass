@@ -8,13 +8,16 @@
 #   ./release.sh 1.2.3      set an exact version
 #
 # Steps: checks the tree is clean and tests pass, bumps CFBundleShortVersionString in Info.plist, builds a
-# universal (Apple Silicon + Intel) Nerdpass.app signed ad hoc and zips it, commits "Release vX.Y.Z", tags
+# universal (Apple Silicon + Intel) Nerdpass.app signed with the "Nerdative Signing" certificate from 1Password
+# (Tools/sign.sh; the release stops if it can't be reached) and zips it, commits "Release vX.Y.Z", tags
 # and pushes, creates the GitHub release with the zip attached, and points the Homebrew cask in
 # github.com/grumpitect/homebrew-nerdpass at it. Needs the GitHub CLI (`gh`) signed in.
 set -euo pipefail
 cd "${0:A:h}"
 
 [ -z "$(git status --porcelain)" ] || { echo "error: commit or stash your changes first"; exit 1; }
+# Every release is signed with the same certificate, so macOS keeps users' permissions across updates.
+Tools/sign.sh --check || { echo "error: can't reach the Nerdative Signing certificate in 1Password (see Tools/setup_signing.sh)"; exit 1; }
 current=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
 IFS=. read -r ma mi pa <<< "$current"
 case "${1:-patch}" in
@@ -33,7 +36,8 @@ swift test --scratch-path "$CACHE/swiftpm" 2>&1 | grep -E "Executed [0-9]+ tests
 previous=$(git describe --tags --abbrev=0 2>/dev/null || true)
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" Info.plist
 
-# Universal build, ad hoc signed (no Apple Developer ID: users approve it once in Privacy & Security).
+# Universal build, signed with the Nerdative Signing certificate (self-signed, not an Apple Developer ID: users
+# approve it once in Privacy & Security, and macOS keeps their permissions across updates).
 # Built before the release commit, so its build number is the commit count that commit will have.
 SCRATCH="$CACHE/universal"
 swift build -c release --product App --arch arm64 --arch x86_64 --scratch-path "$SCRATCH" 2>&1 | grep -E "error|Build complete" | tail -1
@@ -43,7 +47,7 @@ cp "$SCRATCH/out/Products/Release/App" "$APP/Contents/MacOS/Nerdpass"
 cp Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(( $(git rev-list --count HEAD) + 1 ))" "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
-codesign --force --deep --sign - "$APP"
+Tools/sign.sh "$APP"
 ZIP="$DIST/Nerdpass-$version.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
 sha=$(shasum -a 256 "$ZIP" | cut -d' ' -f1)

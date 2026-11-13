@@ -4,11 +4,13 @@
 #
 # Usage:
 #   ./build.sh
-#   SIGN_IDENTITY="Nerdpass Signing" ./build.sh
+#   SIGN_IDENTITY="My Signing" ./build.sh      (sign with a certificate in your own keychain)
+#   NO_1PASSWORD=1 ./build.sh                  (skip the maintainer's 1Password certificate)
 #
-# Set SIGN_IDENTITY to a code signing identity (a free self-signed certificate is enough) so macOS keeps
-# Nerdpass's audio input access across rebuilds. Without it the app is signed ad hoc, and macOS asks for that
-# access again after every rebuild.
+# Signing: with SIGN_IDENTITY, that identity; otherwise the maintainer's "Nerdative Signing" certificate from
+# 1Password when it is reachable (Tools/sign.sh); otherwise ad hoc. A stable certificate keeps macOS permissions
+# (audio input, Accessibility for the volume keys) across rebuilds; ad hoc signatures change every build, so macOS
+# asks again.
 set -euo pipefail
 cd "${0:A:h}"
 
@@ -29,6 +31,8 @@ cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 
 if [ -n "${SIGN_IDENTITY:-}" ]; then
   codesign --force --deep --sign "$SIGN_IDENTITY" "$APP"
+elif [ -z "${NO_1PASSWORD:-}" ] && Tools/sign.sh --check 2>/dev/null; then
+  Tools/sign.sh "$APP"
 else
   codesign --force --deep --sign - "$APP" 2>/dev/null
 fi

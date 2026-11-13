@@ -53,6 +53,12 @@ on your stream means a lot.
   stopped, waiting for you to press start.
 - **open_at_login** (on by default): Nerdpass opens when you log in, so with both on your card is audible from the
   moment the Mac starts. Turn either off in the panel and it stays off.
+- **Shift + volume keys** (on by default): hold Shift and press Volume Up or Down to change Nerdpass's volume in 5%
+  steps (0 to 200%), or Mute to mute and unmute it, without touching the Mac's own volume. A small readout shows the
+  new volume. macOS only passes the volume keys to an app with **Accessibility** access, so the panel shows
+  **allow_volume_keys** until you turn Nerdpass on in System Settings > Privacy & Security > Accessibility. This
+  replaces macOS's own Shift + volume behavior (toggling the volume feedback sound); Shift + Option + volume (fine
+  steps) still reaches macOS. Turn **shift+volume_keys** off in the panel to give the keys back.
 - A `feedback` link straight to GitHub issues.
 
 ## Download
@@ -105,13 +111,12 @@ cd nerdpass
 `build.sh` runs the tests, builds `Nerdpass.app`, and installs it to `~/Applications`. Maintainers publish a release
 with `./release.sh` (patch bump by default; `minor`, `major` or an exact `X.Y.Z` also work).
 
-**Keep audio access across rebuilds (optional, for developers).** macOS remembers audio input access per code
-signature. Ad hoc builds get a new signature every time, so macOS asks again after each rebuild. A free self-signed
-certificate fixes that:
-
-1. Keychain Access > Certificate Assistant > Create a Certificate
-2. Name `Nerdpass Signing`, Identity Type **Self Signed Root**, Certificate Type **Code Signing**
-3. Build with `SIGN_IDENTITY="Nerdpass Signing" ./build.sh`
+**Signing.** Releases are signed with one self-signed certificate ("Nerdative Signing"), so macOS keeps your
+permissions (audio input, Accessibility) across updates. The maintainer's certificate lives in 1Password and
+`Tools/sign.sh` uses it; your own builds are signed ad hoc, so macOS asks for those permissions again after each
+rebuild. To avoid that, make your own code signing certificate (Keychain Access > Certificate Assistant > Create a
+Certificate, Identity Type **Self Signed Root**, Certificate Type **Code Signing**) and build with
+`SIGN_IDENTITY="<its name>" ./build.sh`.
 
 ## Command line
 
@@ -130,9 +135,10 @@ played, the buffer's delay, dropouts and the level. Quit the menu bar Nerdpass f
 ## Development
 
 ```bash
-swift test      # 44 tests: capture card detection, picking the input and output, start/stop, unplug and replug,
+swift test      # 49 tests: capture card detection, picking the input and output, start/stop, unplug and replug,
                 # always on at launch, volume curve and boost, soft clipper, the output buffer, settings,
-                # menu layout, meter scale and needle ballistics, looks (labels, on-air clock, dB scale)
+                # menu layout, meter scale and needle ballistics, looks (labels, on-air clock, dB scale),
+                # volume keys (reading the key events, steps, mute)
 swift build
 ```
 

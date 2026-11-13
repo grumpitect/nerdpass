@@ -13,6 +13,10 @@ public enum MenuEntry: Equatable {
     case output(name: String?, symbol: String, checked: Bool)
     /// Microphone access was refused; clicking opens the Privacy settings.
     case permission
+    /// Shift + the volume keys control Nerdpass.
+    case volumeKeys(on: Bool)
+    /// The volume keys are on but Accessibility access is missing; clicking asks for it.
+    case allowVolumeKeys
     /// The look picker: burst, needle, phosphor or tally.
     case look(Look)
     case feedback
@@ -35,9 +39,13 @@ public struct MenuState {
     public var alwaysOn: Bool
     public var openAtLogin: Bool
     public var accessDenied: Bool
+    public var volumeKeys: Bool
+    public var volumeKeysAllowed: Bool
     public init(flow: FlowState, inputs: [AudioInput], selectedID: String?, outputs: [AudioOutput] = [],
                 selectedOutputID: String? = nil, volumePercent: Int, look: Look = .burst,
-                alwaysOn: Bool, openAtLogin: Bool, accessDenied: Bool = false) {
+                alwaysOn: Bool, openAtLogin: Bool, accessDenied: Bool = false,
+                volumeKeys: Bool = false, volumeKeysAllowed: Bool = true) {
+        self.volumeKeys = volumeKeys; self.volumeKeysAllowed = volumeKeysAllowed
         self.look = look
         self.flow = flow; self.inputs = inputs; self.selectedID = selectedID
         self.outputs = outputs; self.selectedOutputID = selectedOutputID
@@ -50,7 +58,7 @@ public let captureCardSymbol = "tv"
 public let otherInputSymbol = "mic"
 
 /// Start/stop and the volume first, then the inputs (capture cards before microphones), then the outputs (the
-/// Mac's default first), then the look, feedback, always on, open at login, and Exit last.
+/// Mac's default first), then the look, feedback, always on, open at login, the volume keys, and Exit last.
 public func menuEntries(for s: MenuState) -> [MenuEntry] {
     var items: [MenuEntry] = [
         .flow(status: statusLine(s.flow, output: s.outputs.first { $0.id == s.selectedOutputID }?.name), on: s.flow.isOn, enabled: s.flow.isOn || !s.inputs.isEmpty),
@@ -58,6 +66,7 @@ public func menuEntries(for s: MenuState) -> [MenuEntry] {
         .separator,
     ]
     if s.accessDenied { items.append(.permission) }
+    if s.volumeKeys && !s.volumeKeysAllowed { items.append(.allowVolumeKeys) }
     items.append(.header("// input"))
     if s.inputs.isEmpty { items.append(.noInputs) }
     let cards = s.inputs.filter(\.looksLikeCaptureCard), others = s.inputs.filter { !$0.looksLikeCaptureCard }
@@ -75,6 +84,7 @@ public func menuEntries(for s: MenuState) -> [MenuEntry] {
     items.append(.feedback)
     items.append(.alwaysOn(on: s.alwaysOn))
     items.append(.openAtLogin(on: s.openAtLogin))
+    items.append(.volumeKeys(on: s.volumeKeys))
     items.append(.exit)
     return items
 }
