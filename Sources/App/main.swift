@@ -1442,6 +1442,44 @@ enum StatusIcon {
     }
 }
 
+/// Draws the menu bar icon into one reusable bitmap (2x, sRGB) and hands back a new image only when the pixels
+/// changed. A silent card, a stopped meter or a held state draws the same frame over and over; skipping those spares
+/// macOS redrawing the menu bar (and the color conversion of a fresh vector image) up to 20 times a second.
+final class StatusIconRenderer {
+    private let context: CGContext
+    private let graphics: NSGraphicsContext
+    private var last: Data?
+    private static let points = 22, scale = 2
+
+    init() {
+        let pixels = Self.points * Self.scale
+        context = CGContext(data: nil, width: pixels, height: pixels, bitsPerComponent: 8, bytesPerRow: pixels * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.scaleBy(x: CGFloat(Self.scale), y: CGFloat(Self.scale))
+        graphics = NSGraphicsContext(cgContext: context, flipped: false)
+    }
+
+    /// The icon to show, or nil when it would look exactly like the one already shown.
+    func render(look: Look, meter: MeterAnimator, darkMenuBar: Bool) -> NSImage? {
+        let source = StatusIcon.image(look: look, meter: meter, darkMenuBar: darkMenuBar)
+        let rect = NSRect(x: 0, y: 0, width: Self.points, height: Self.points)
+        context.clear(rect)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphics
+        source.draw(in: rect)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let bytes = context.data, let cg = context.makeImage() else { return source }
+        var frame = Data(bytes: bytes, count: context.bytesPerRow * context.height)
+        frame.append(source.isTemplate ? 1 : 0)
+        guard frame != last else { return nil }
+        last = frame
+        let image = NSImage(cgImage: cg, size: rect.size)
+        image.isTemplate = source.isTemplate
+        return image
+    }
+}
+
 /// Borderless floating panel shown under the menu bar icon.
 final class NerdPanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -1525,7 +1563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let button = statusItem.button {
-            button.image = StatusIcon.image(look: model.look, meter: model.meter, darkMenuBar: isDarkMenuBar)
+            button.image = iconRenderer.render(look: model.look, meter: model.meter, darkMenuBar: isDarkMenuBar)
             button.imageScaling = .scaleNone
             button.toolTip = "Nerdpass"
             button.target = self
@@ -1646,26 +1684,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var iconTimer: Timer?
+    private let iconRenderer = StatusIconRenderer()
+
+    /// Shows the icon for the current state, when it looks different from the one shown.
+    private func drawStatusIcon() {
+        if let image = iconRenderer.render(look: model.look, meter: model.meter, darkMenuBar: isDarkMenuBar) {
+            statusItem.button?.image = image
+        }
+    }
     private var lastTick = Date()
 
     private var isDarkMenuBar: Bool {
         statusItem.button?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
-    /// Runs the meter at 30 frames a second while there is something to animate (sound flowing, waiting for the
+    /// Runs the meter at 20 frames a second while there is something to animate (sound flowing, waiting for the
     /// card, or the needle and backlight still settling after a stop). Then the timer stops and the icon holds still.
     private func updateStatusIcon() {
         statusItem.button?.toolTip = "Nerdpass: " + statusLine(model.pass.state, output: model.pass.selectedOutput?.name)
         model.stepMeter(0)
-        statusItem.button?.image = StatusIcon.image(look: model.look, meter: model.meter, darkMenuBar: isDarkMenuBar)
+        drawStatusIcon()
         guard iconTimer == nil, !model.meter.isIdle else { return }
         lastTick = Date()
-        let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] timer in
+        let t = Timer(timeInterval: 1.0 / 20, repeats: true) { [weak self] timer in
             guard let self else { return }
             let now = Date()
             self.model.stepMeter(now.timeIntervalSince(self.lastTick))
             self.lastTick = now
-            self.statusItem.button?.image = StatusIcon.image(look: self.model.look, meter: self.model.meter, darkMenuBar: self.isDarkMenuBar)
+            self.drawStatusIcon()
             if self.model.meter.isIdle { timer.invalidate(); self.iconTimer = nil }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -1690,10 +1736,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             p.hasShadow = false
             p.ignoresMouseEvents = true
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            p.contentView = NSHostingView(rootView: VolumeReadout(model: model))
             return p
         }()
         readout = r
+        if r.contentView == nil { r.contentView = NSHostingView(rootView: VolumeReadout(model: model)) }
         if let hosting = r.contentView {
             let size = hosting.fittingSize
             let bwin = statusItem.button?.window
@@ -1709,7 +1755,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         r.orderFrontRegardless()
         readoutHide?.cancel()
         let hide = DispatchWorkItem { [weak r] in
-            NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; r?.animator().alphaValue = 0 }, completionHandler: { r?.orderOut(nil) })
+            NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; r?.animator().alphaValue = 0 }, completionHandler: {
+                guard let r, r.alphaValue == 0 else { return }               // shown again meanwhile
+                r.orderOut(nil)
+                r.contentView = nil
+            })
         }
         readoutHide = hide
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: hide)
@@ -1724,6 +1774,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.refresh()
         let p = panel ?? makePanel()
         panel = p
+        // The content exists only while the panel is open: closed, its animations (waves, clocks) would keep
+        // redrawing unseen.
+        p.contentView = NSHostingView(rootView: NerdView(model: model))
         resizePanel()
         p.orderFrontRegardless()
         p.makeKey()
@@ -1743,6 +1796,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func closePanel() {
         panel?.orderOut(nil)
+        panel?.contentView = nil
         if let m = clickMonitor { NSEvent.removeMonitor(m) }
         if let m = keyMonitor { NSEvent.removeMonitor(m) }
         clickMonitor = nil; keyMonitor = nil
@@ -1758,7 +1812,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.isOpaque = false
         p.hasShadow = false
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        p.contentView = NSHostingView(rootView: NerdView(model: model))
         return p
     }
 

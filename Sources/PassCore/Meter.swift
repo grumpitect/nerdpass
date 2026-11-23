@@ -49,7 +49,7 @@ public struct NeedleBallistics: Equatable {
 }
 
 /// Everything that moves in the meter: the needle, the backlight warming up and fading, and the self-test sweep
-/// while Nerdpass waits for the card. The app steps it about 30 times a second and draws from it.
+/// while Nerdpass waits for the card. The app steps it about 20 times a second and draws from it.
 public struct MeterAnimator {
     public enum Mode: Equatable { case off, flowing, waiting }
     public private(set) var mode: Mode = .off
